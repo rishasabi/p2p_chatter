@@ -1,83 +1,88 @@
-// import 'package:flutter/material.dart';
-
-// class NodeSettingsScreen extends StatelessWidget {
-//   const NodeSettingsScreen({super.key});
-
-//   @override
-//   Widget build(BuildContext context) {
-//     return Scaffold(
-//       appBar: AppBar(
-//         title: const Text('Network Health'),
-//       ),
-//       body: ListView(
-//         padding: const EdgeInsets.all(16.0),
-//         children: const [
-//           Card(
-//             color: Color(0xFF1E1A17),
-//             child: ListTile(
-//               leading: Icon(Icons.wifi_tethering, color: Color(0xFF4ADE80)),
-//               title: Text('Mesh Status: Active', style: TextStyle(color: Colors.white)),
-//               subtitle: Text('Listening for nearby relay nodes', style: TextStyle(color: Colors.grey)),
-//             ),
-//           ),
-//           Card(
-//             color: Color(0xFF1E1A17),
-//             child: ListTile(
-//               leading: Icon(Icons.alt_route, color: Color(0xFF935F32)),
-//               title: Text('Known Multi-Hop Routes', style: TextStyle(color: Colors.white)),
-//               subtitle: Text('4 nodes in DHT table', style: TextStyle(color: Colors.grey)),
-//             ),
-//           ),
-//         ],
-//       ),
-//     );
-//   }
-// }
-
 import 'package:flutter/material.dart';
-import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../application_api.dart';
+import '../models/node_info.dart';
 import '../providers/theme_provider.dart';
 
 class NodeSettingsScreen extends ConsumerStatefulWidget {
-//class NodeSettingsScreen extends StatefulWidget {
   const NodeSettingsScreen({super.key});
 
   @override
   ConsumerState<NodeSettingsScreen> createState() => _NodeSettingsScreenState();
-  //State<NodeSettingsScreen> createState() => _NodeSettingsScreenState();
 }
-class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen>{
-//class _NodeSettingsScreenState extends State<NodeSettingsScreen> {
+
+class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
+  final ApplicationAPI api = ApplicationAPI();
   bool _bgSync = true;
-  bool _actAsRelay = true;
   bool _publishToDHT = false;
-  double _storageLimit = 60.0;
+  bool _isBackendOnline = false;
+  NodeInfo? _nodeInfo;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchNodeData();
+  }
+
+  Future<void> _fetchNodeData() async {
+    try {
+      final online = await api.checkHealth();
+      NodeInfo? info;
+      if (online) {
+        info = await api.getNode();
+      }
+      if (mounted) {
+        setState(() {
+          _isBackendOnline = online;
+          _nodeInfo = info;
+        });
+      }
+    } catch (_) {}
+  }
 
   @override
   Widget build(BuildContext context) {
-    //added new for dark and light theme
     final themeMode = ref.watch(themeProvider);
     final isDark = themeMode == ThemeMode.dark;
+
+    final peerIdDisplay = _nodeInfo != null
+        ? 'PeerID ${_nodeInfo!.shortId}'
+        : (_isBackendOnline ? 'PeerID loading...' : 'PeerID (Offline)');
+
     return Scaffold(
-      appBar: AppBar(title: const Text('Node Configuration')),
+      appBar: AppBar(
+        title: const Text('Node Configuration'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _fetchNodeData,
+            tooltip: 'Refresh node info',
+          ),
+        ],
+      ),
       body: ListView(
         padding: const EdgeInsets.symmetric(vertical: 16.0),
         children: [
           // Network Health Status
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16.0),
-            child: Column(
-              children: const [
-                Card(
-                  color: Color(0xFF1E1A17),
-                  child: ListTile(
-                    leading: Icon(Icons.wifi_tethering, color: Color(0xFF4ADE80)),
-                    title: Text('Mesh Status: Active', style: TextStyle(color: Colors.white)),
-                    subtitle: Text('Listening for nearby relay nodes', style: TextStyle(color: Colors.grey, fontSize: 12)),
-                  ),
+            child: Card(
+              color: const Color(0xFF1E1A17),
+              child: ListTile(
+                leading: Icon(
+                  Icons.wifi_tethering, 
+                  color: _isBackendOnline ? const Color(0xFF4ADE80) : Colors.redAccent,
                 ),
-                ],
+                title: Text(
+                  _isBackendOnline ? 'Mesh Status: Active (Online)' : 'Mesh Status: Offline', 
+                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                ),
+                subtitle: Text(
+                  _isBackendOnline ? 'Connected to local Go P2P daemon' : 'Connecting to local node...', 
+                  style: const TextStyle(color: Colors.grey, fontSize: 12),
+                ),
+              ),
             ),
           ),
           
@@ -93,17 +98,34 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen>{
             title: const Text('Dark Theme'),
             subtitle: Text(isDark ? 'Terminal dark mode' : 'Sand light mode', style: const TextStyle(fontSize: 12, color: Colors.grey)),
             value: isDark,
-            activeColor: const Color(0xFF4ADE80),
+            activeThumbColor: const Color(0xFF4ADE80),
             onChanged: (val) {
               ref.read(themeProvider.notifier).toggleTheme(val);
             },
           ),
 
           const Divider(color: Color(0xFF2A2420), height: 32),
+
           // Node Identity
-          const ListTile(
-            title: Text('This node', style: TextStyle(fontWeight: FontWeight.bold)),
-            subtitle: Text('PeerID 7c4e·f10b·92da', style: TextStyle(color: Colors.grey)),
+          ListTile(
+            title: const Text('This node', style: TextStyle(fontWeight: FontWeight.bold)),
+            subtitle: Text(peerIdDisplay, style: const TextStyle(color: Colors.grey, fontFamily: 'monospace')),
+            trailing: _nodeInfo != null
+                ? IconButton(
+                    icon: const Icon(Icons.copy, size: 16, color: Colors.grey),
+                    tooltip: 'Copy full PeerID',
+                    onPressed: () {
+                      Clipboard.setData(ClipboardData(text: _nodeInfo!.id));
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          backgroundColor: Color(0xFF935F32),
+                          content: Text('Full Peer ID copied to clipboard!'),
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                    },
+                  )
+                : null,
           ),
           
           // Toggles
@@ -111,14 +133,14 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen>{
             title: const Text('Background sync'),
             subtitle: const Text('Keep gossiping while the app is closed', style: TextStyle(color: Colors.grey, fontSize: 12)),
             value: _bgSync,
-            activeColor: const Color(0xFF4ADE80),
+            activeThumbColor: const Color(0xFF4ADE80),
             onChanged: (val) => setState(() => _bgSync = val),
           ),
-         SwitchListTile(
+          SwitchListTile(
             title: const Text('Publish to DHT'),
             subtitle: const Text('Let unknown peers discover your PeerID', style: TextStyle(color: Colors.grey, fontSize: 12)),
             value: _publishToDHT,
-            activeColor: const Color(0xFF4ADE80),
+            activeThumbColor: const Color(0xFF4ADE80),
             onChanged: (val) => setState(() => _publishToDHT = val),
           ),
 

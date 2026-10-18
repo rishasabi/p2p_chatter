@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
-import '../main.dart'; // Adjust path if needed to access MainNavigationScreen
+import '../application_api.dart';
+import '../main.dart';
+import '../models/node_info.dart';
+
+import '../services/embedded_node_service.dart';
 
 class InitializationScreen extends StatefulWidget {
   const InitializationScreen({super.key});
@@ -13,10 +17,12 @@ class _InitializationScreenState extends State<InitializationScreen> {
   int _currentBootStep = 0;
   bool _isBootComplete = false;
   final TextEditingController _handleController = TextEditingController();
+  final ApplicationAPI api = ApplicationAPI();
+  NodeInfo? _liveNodeInfo;
 
   final List<String> _bootSteps = [
     'Reading local vault',
-    'Starting BLE service',
+    'Starting P2P transport',
     'Seeding DHT peer table',
     'Restoring message queue'
   ];
@@ -28,9 +34,18 @@ class _InitializationScreenState extends State<InitializationScreen> {
   }
 
   void _startBootSequence() async {
-    // Simulate the time it takes to boot the mesh node
+    // Ensure embedded Go service is running
+    await EmbeddedNodeService().ensureStarted();
+
+    // Fetch persistent node identity
+    try {
+      final info = await api.getNode();
+      if (mounted) setState(() => _liveNodeInfo = info);
+    } catch (_) {}
+
+    // Step through the boot sequence
     for (int i = 0; i <= _bootSteps.length; i++) {
-      await Future.delayed(const Duration(milliseconds: 800));
+      await Future.delayed(const Duration(milliseconds: 400));
       if (mounted) {
         setState(() {
           _currentBootStep = i;
@@ -38,7 +53,6 @@ class _InitializationScreenState extends State<InitializationScreen> {
       }
     }
     
-    // Transition to the login/profile state
     if (mounted) {
       setState(() {
         _isBootComplete = true;
@@ -48,12 +62,17 @@ class _InitializationScreenState extends State<InitializationScreen> {
 
   void _joinMesh() {
     if (_handleController.text.isNotEmpty) {
-      // In a real app, you would save the handle/PeerID to local storage here
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(builder: (context) => const MainNavigationScreen()),
       );
     }
+  }
+
+  @override
+  void dispose() {
+    _handleController.dispose();
+    super.dispose();
   }
 
   @override
@@ -108,7 +127,7 @@ class _InitializationScreenState extends State<InitializationScreen> {
                   onPressed: _isBootComplete ? _joinMesh : null,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF935F32),
-                    disabledBackgroundColor: const Color(0xFF2A1C0E), // Dimmed brown when inactive
+                    disabledBackgroundColor: const Color(0xFF2A1C0E),
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
                   ),
                   child: Text(
@@ -166,6 +185,10 @@ class _InitializationScreenState extends State<InitializationScreen> {
   }
 
   Widget _buildProfileSetup() {
+    final peerDisplay = _liveNodeInfo != null
+        ? 'PeerID ${_liveNodeInfo!.shortId} — generated on this node'
+        : 'PeerID 7c4e·f10b·92da — local node identity';
+
     return Column(
       key: const ValueKey('profile'),
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -181,7 +204,7 @@ class _InitializationScreenState extends State<InitializationScreen> {
             enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFF2A2420))),
             focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFF935F32))),
           ),
-          onChanged: (val) => setState(() {}), // Trigger rebuild to activate button if text isn't empty
+          onChanged: (val) => setState(() {}),
         ),
         const SizedBox(height: 24),
         Row(
@@ -191,8 +214,8 @@ class _InitializationScreenState extends State<InitializationScreen> {
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                'PeerID 7c4e·f10b·92da — generated on this device',
-                style: TextStyle(color: Colors.grey.shade600, fontSize: 11),
+                peerDisplay,
+                style: TextStyle(color: Colors.grey.shade600, fontSize: 11, fontFamily: 'monospace'),
               ),
             )
           ],

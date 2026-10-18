@@ -1,64 +1,3 @@
-// import 'package:flutter/material.dart';
-// import '../application_api.dart';
-// import 'chat_screen.dart';
-
-// class MeshScreen extends StatefulWidget {
-//   const MeshScreen({super.key});
-
-//   @override
-//   State<MeshScreen> createState() => _MeshScreenState();
-// }
-
-// class _MeshScreenState extends State<MeshScreen> {
-//   final ApplicationAPI api = ApplicationAPI();
-//   List<Map<String, dynamic>> peers = [];
-
-//   @override
-//   void initState() {
-//     super.initState();
-//     _loadPeers();
-//   }
-
-//   void _loadPeers() async {
-//     final loadedPeers = await api.getPeers();
-//     setState(() => peers = loadedPeers);
-//   }
-
-//   @override
-//   Widget build(BuildContext context) {
-//     return Scaffold(
-//       appBar: AppBar(
-//         title: const Text('Ember', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-//       ),
-//       body: peers.isEmpty 
-//         ? const Center(child: CircularProgressIndicator(color: Color(0xFF935F32)))
-//         : ListView.builder(
-//             padding: const EdgeInsets.all(16),
-//             itemCount: peers.length,
-//             itemBuilder: (context, index) {
-//               final peer = peers[index];
-//               return ListTile(
-//                 leading: CircleAvatar(
-//                   backgroundColor: const Color(0xFF1E1A17),
-//                   child: Text(peer['name'].substring(0, 2), style: const TextStyle(color: Colors.white)),
-//                 ),
-//                 title: Text(peer['name'], style: const TextStyle(fontWeight: FontWeight.bold)),
-//                 subtitle: Text(peer['type'], style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
-//                 trailing: Icon(
-//                   Icons.circle, 
-//                   size: 10, 
-//                   color: peer['online'] ? const Color(0xFF4ADE80) : Colors.grey
-//                 ),
-//                 onTap: () => Navigator.push(context, MaterialPageRoute(
-//                   builder: (_) => ChatScreen(peerName: peer['name'], peerId: peer['id'], isOnline: peer['online']),
-//                 )),
-//               );
-//             },
-//           ),
-//     );
-//   }
-// }
-
 import 'package:flutter/material.dart';
 import '../application_api.dart';
 import 'chat_screen.dart';
@@ -75,33 +14,57 @@ class _MeshScreenState extends State<MeshScreen> {
   List<Map<String, dynamic>> peers = [];
   List<Map<String, dynamic>> filteredPeers = [];
   final TextEditingController _searchController = TextEditingController();
+  bool _isLoading = true;
 
   @override
   void initState() {
     super.initState();
     _loadPeers();
     _searchController.addListener(_filterPeers);
+    api.onPeerUpdate(_handlePeerUpdate);
   }
 
-  void _loadPeers() async {
-    final loadedPeers = await api.getPeers();
-    setState(() {
-      peers = loadedPeers;
-      filteredPeers = loadedPeers;
-    });
+  void _handlePeerUpdate(Map<String, dynamic> update) {
+    if (mounted) {
+      _loadPeers();
+    }
+  }
+
+  Future<void> _loadPeers() async {
+    try {
+      final loadedPeers = await api.getPeers();
+      if (mounted) {
+        setState(() {
+          peers = loadedPeers;
+          _isLoading = false;
+        });
+        _filterPeers();
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
   }
 
   void _filterPeers() {
-    final query = _searchController.text.toLowerCase();
+    final query = _searchController.text.toLowerCase().trim();
     setState(() {
-      filteredPeers = peers.where((peer) {
-        return peer['name'].toString().toLowerCase().contains(query);
-      }).toList();
+      if (query.isEmpty) {
+        filteredPeers = List.from(peers);
+      } else {
+        filteredPeers = peers.where((peer) {
+          final name = peer['name'].toString().toLowerCase();
+          final id = peer['id'].toString().toLowerCase();
+          return name.contains(query) || id.contains(query);
+        }).toList();
+      }
     });
   }
 
   @override
   void dispose() {
+    api.removeOnPeerUpdate(_handlePeerUpdate);
     _searchController.dispose();
     super.dispose();
   }
@@ -111,6 +74,16 @@ class _MeshScreenState extends State<MeshScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Chatter', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh, color: Colors.grey),
+            tooltip: 'Refresh peers',
+            onPressed: () {
+              setState(() => _isLoading = true);
+              _loadPeers();
+            },
+          ),
+        ],
       ),
       body: Column(
         children: [
@@ -136,31 +109,79 @@ class _MeshScreenState extends State<MeshScreen> {
           
           // Threads List
           Expanded(
-            child: peers.isEmpty 
-              ? const Center(child: CircularProgressIndicator(color: Color(0xFF935F32)))
-              : ListView.builder(
-                  padding: const EdgeInsets.all(16),
-                  itemCount: filteredPeers.length,
-                  itemBuilder: (context, index) {
-                    final peer = filteredPeers[index];
-                    return ListTile(
-                      leading: CircleAvatar(
-                        backgroundColor: const Color(0xFF1E1A17),
-                        child: Text(peer['name'].substring(0, 2), style: const TextStyle(color: Colors.white)),
-                      ),
-                      title: Text(peer['name'], style: const TextStyle(fontWeight: FontWeight.bold)),
-                      subtitle: Text(peer['type'], style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
-                      trailing: Icon(
-                        Icons.circle, 
-                        size: 10, 
-                        color: peer['online'] ? const Color(0xFF4ADE80) : Colors.grey
-                      ),
-                      onTap: () => Navigator.push(context, MaterialPageRoute(
-                        builder: (_) => ChatScreen(peerName: peer['name'], peerId: peer['id'], isOnline: peer['online']),
-                      )),
-                    );
-                  },
-                ),
+            child: RefreshIndicator(
+              color: const Color(0xFF935F32),
+              onRefresh: _loadPeers,
+              child: _isLoading && peers.isEmpty
+                  ? const Center(child: CircularProgressIndicator(color: Color(0xFF935F32)))
+                  : peers.isEmpty
+                      ? Center(
+                          child: SingleChildScrollView(
+                            physics: const AlwaysScrollableScrollPhysics(),
+                            child: Padding(
+                              padding: const EdgeInsets.all(32.0),
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.speaker_phone, size: 48, color: Colors.grey.shade600),
+                                  const SizedBox(height: 16),
+                                  const Text(
+                                    'No peers connected yet',
+                                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    'Scan a peer\'s code in the Discover tab to connect to the mesh network.',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(color: Colors.grey.shade500, fontSize: 12),
+                                  ),
+                                  const SizedBox(height: 20),
+                                  OutlinedButton.icon(
+                                    icon: const Icon(Icons.refresh, size: 16),
+                                    label: const Text('Check again'),
+                                    onPressed: () {
+                                      setState(() => _isLoading = true);
+                                      _loadPeers();
+                                    },
+                                    style: OutlinedButton.styleFrom(
+                                      foregroundColor: const Color(0xFF935F32),
+                                      side: const BorderSide(color: Color(0xFF935F32)),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        )
+                      : ListView.builder(
+                          physics: const AlwaysScrollableScrollPhysics(),
+                          padding: const EdgeInsets.all(16),
+                          itemCount: filteredPeers.length,
+                          itemBuilder: (context, index) {
+                            final peer = filteredPeers[index];
+                            final name = peer['name'] ?? 'Peer';
+                            final initial = name.length >= 2 ? name.substring(0, 2) : name;
+                            final isOnline = peer['online'] == true;
+
+                            return ListTile(
+                              leading: CircleAvatar(
+                                backgroundColor: const Color(0xFF1E1A17),
+                                child: Text(initial, style: const TextStyle(color: Colors.white, fontSize: 13)),
+                              ),
+                              title: Text(name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                              subtitle: Text(peer['type'] ?? 'DIRECT P2P', style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
+                              trailing: Icon(
+                                Icons.circle, 
+                                size: 10, 
+                                color: isOnline ? const Color(0xFF4ADE80) : Colors.grey
+                              ),
+                              onTap: () => Navigator.push(context, MaterialPageRoute(
+                                builder: (_) => ChatScreen(peerName: name, peerId: peer['id'], isOnline: isOnline),
+                              )),
+                            );
+                          },
+                        ),
+            ),
           ),
         ],
       ),
