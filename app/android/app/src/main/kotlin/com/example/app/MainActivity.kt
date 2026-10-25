@@ -605,7 +605,8 @@ class MainActivity : FlutterActivity() {
                                 val timestamp = json.optString("timestamp", System.currentTimeMillis().toString())
                                 val id = json.optInt("id", (System.currentTimeMillis() % 100000).toInt())
 
-                                Log.i(TAG, "Received Bluetooth message from $from: $content")
+                                // Content is an opaque (signed) mesh frame for the Go node
+                                Log.i(TAG, "Received Bluetooth frame from $from (${content.length} bytes)")
 
                                 // Confirm receipt so the sender knows it can stop trying
                                 json.optString("msgId").takeIf { it.isNotEmpty() }?.let { msgId ->
