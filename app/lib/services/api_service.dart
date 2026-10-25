@@ -100,17 +100,74 @@ class ChatterApiService {
         .toList();
   }
 
+  /// Sends [content] to [peerId] under message ID [id]. The node relays it
+  /// through other peers when there's no direct link. Returns the ID used.
+  Future<String> sendChat(String peerId, String content, {String? id}) async {
+    final body = await _post('/message', {
+      'peer_id': peerId,
+      'content': content,
+      if (id != null) 'id': id,
+    });
+    return body['id'] as String? ?? id ?? '';
+  }
+
+  // ── Receipts ─────────────────────────────────────────────────────────────────
+
+  /// Receipts from peers for messages we sent, after [afterId].
+  Future<List<Receipt>> getReceipts({int afterId = -1}) async {
+    final uri = Uri.parse('$baseUrl/receipts').replace(
+      queryParameters: {'after': afterId.toString()},
+    );
+    final response = await _rawGet(uri);
+    final list = response['receipts'] as List? ?? [];
+    return list.cast<Map<String, dynamic>>().map(Receipt.fromJson).toList();
+  }
+
+  /// Tells [peerId] that we received or read the messages [ids].
+  Future<void> sendReceipt(String peerId, List<String> ids, String status) async {
+    await _post('/receipts', {'peer_id': peerId, 'ids': ids, 'status': status});
+  }
+
+  // ── Bluetooth bridge ─────────────────────────────────────────────────────────
+  // The node routes over Bluetooth links that live in the app: we report our
+  // Bluetooth neighbours, carry its outgoing frames, and hand in received ones.
+
+  Future<void> setBluetoothPeers(List<String> peerIds) async {
+    await _post('/bt/peers', {'peers': peerIds});
+  }
+
+  /// Waits up to [wait] for frames to send over Bluetooth. Each frame's data
+  /// is base64 and is passed through untouched.
+  Future<List<({String to, String data})>> bluetoothOutbox(
+      {Duration wait = const Duration(seconds: 20)}) async {
+    final uri = Uri.parse('$baseUrl/bt/outbox').replace(
+      queryParameters: {'wait': wait.inSeconds.toString()},
+    );
+    final response = await _rawGet(uri, timeout: wait + const Duration(seconds: 5));
+    final list = response['frames'] as List? ?? [];
+    return list
+        .cast<Map<String, dynamic>>()
+        .map((f) => (to: f['to'] as String, data: f['data'] as String))
+        .toList();
+  }
+
+  /// Hands the node a frame (base64 [data]) received from Bluetooth neighbour [from].
+  Future<void> bluetoothInbox(String from, String data) async {
+    await _post('/bt/inbox', {'from': from, 'data': data});
+  }
+
   // ── Private helpers ──────────────────────────────────────────────────────────
 
   Future<Map<String, dynamic>> _get(String path) async {
     return _rawGet(Uri.parse('$baseUrl$path'));
   }
 
-  Future<Map<String, dynamic>> _rawGet(Uri uri) async {
+  Future<Map<String, dynamic>> _rawGet(Uri uri,
+      {Duration timeout = const Duration(seconds: 10)}) async {
     try {
       final response = await _client
           .get(uri)
-          .timeout(const Duration(seconds: 10));
+          .timeout(timeout);
       _assertOk(response);
       return jsonDecode(response.body) as Map<String, dynamic>;
     } on ApiException {
@@ -122,7 +179,7 @@ class ChatterApiService {
 
   Future<Map<String, dynamic>> _post(
     String path,
-    Map<String, String> body,
+    Map<String, Object?> body,
   ) async {
     try {
       final response = await _client

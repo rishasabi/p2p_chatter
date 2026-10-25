@@ -2,10 +2,14 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:uuid/uuid.dart';
+import 'models/chat_message.dart';
 import 'models/node_info.dart';
 import 'services/api_service.dart';
 import 'services/ble_service.dart';
+import 'services/chat_store.dart';
 import 'services/local_store.dart';
+import 'services/settings_store.dart';
 
 /// ApplicationAPI connects the Ember / Chatter UI to both the Go P2P backend
 /// (Wi-Fi) and the direct offline Bluetooth layer, and keeps a single view of
@@ -24,13 +28,16 @@ class ApplicationAPI {
   Timer? _saveTimer;
   StreamSubscription<List<NearbyNode>>? _nearbySubscription;
   int _lastMessageId = -1;
+  int _lastReceiptId = -1;
   bool _pollingPeers = false;
   bool _pollingMessages = false;
+  bool _bridgeRunning = false;
   int _maintenanceTicks = 0;
   DateTime _lastScanAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   final List<Function(Map<String, dynamic>)> _messageCallbacks = [];
   final List<Function(Map<String, dynamic>)> _peerUpdateCallbacks = [];
+  final List<void Function(String peerId)> _historyCallbacks = [];
 
   String? _myPeerId;
   String? _myHandle;
@@ -57,9 +64,18 @@ class ApplicationAPI {
   /// Last status published per peer, so listeners only hear about changes.
   final Map<String, String> _publishedStatus = {};
 
-  /// Per-peer chat history, kept here so messages that arrive while no chat
-  /// screen is open (or after one is closed) are not lost.
+  /// When a peer last reached us through a relay (a message or receipt whose
+  /// previous hop wasn't the peer itself).
+  final Map<String, DateTime> _relayedSeen = {};
+
+  /// Per-peer chat history (see [ChatStore] for the message shape), kept here
+  /// and on disk so nothing is lost while no chat screen is open, or across
+  /// restarts. [_messageIndex] finds a message by ID for receipts and dedup.
   final Map<String, List<Map<String, dynamic>>> _history = {};
+  final Map<String, Map<String, dynamic>> _messageIndex = {};
+  final Set<String> _markingRead = {};
+  final ChatStore _chatStore = ChatStore();
+  static const _uuid = Uuid();
 
   Future<void>? _initFuture;
 
@@ -99,6 +115,7 @@ class ApplicationAPI {
     stored.forEach((id, value) {
       if (value is Map) _contacts[id] = Map<String, dynamic>.from(value);
     });
+    await _loadHistory();
 
     final info = await getNode();
     final profile = await LocalStore.read('profile.json');
@@ -119,6 +136,7 @@ class ApplicationAPI {
       if (await _bleService.getBroadcastEnabled()) {
         await setBroadcastEnabled(true);
       }
+      unawaited(_runBluetoothBridge());
     }
     _maintenanceTimer ??= Timer.periodic(const Duration(seconds: 3), (_) => _maintainLinks());
     _maintainLinks();
@@ -192,26 +210,47 @@ class ApplicationAPI {
   }
 
   /// Current status of one peer: name, and whether it is reachable over
-  /// Wi-Fi and/or Bluetooth right now.
+  /// Wi-Fi and/or Bluetooth right now, or recently through a relay.
   Map<String, dynamic> peerStatus(String peerId) {
     final wifi = _wifiPeers.contains(peerId);
     final bt = _bluetoothPeers.containsKey(peerId);
+    final relayedAt = _relayedSeen[peerId];
+    final mesh = !wifi &&
+        !bt &&
+        relayedAt != null &&
+        DateTime.now().difference(relayedAt) < const Duration(minutes: 2);
     return {
       'id': peerId,
       'name': displayName(peerId),
       'handle': _contacts[peerId]?['handle'],
       'wifi': wifi,
       'bt': bt,
-      'online': wifi || bt,
+      'mesh': mesh,
+      'online': wifi || bt || mesh,
+      'unread': unreadCount(peerId),
       'type': wifi && bt
           ? 'WI-FI + BLUETOOTH'
           : wifi
               ? 'WI-FI'
               : bt
                   ? 'BLUETOOTH'
-                  : 'OFFLINE',
+                  : mesh
+                      ? 'VIA MESH'
+                      : 'OFFLINE',
     };
   }
+
+  /// Full peer ID of a known or linked peer whose ID starts with [prefix]
+  /// (as advertised over BLE), or null if we don't know them yet.
+  String? peerIdForPrefix(String prefix) =>
+      {..._contacts.keys, ..._bluetoothPeers.keys}.where((id) => id.startsWith(prefix)).firstOrNull;
+
+  /// Whether we hold a direct Bluetooth link to [peerId].
+  bool isBluetoothLinked(String peerId) => _bluetoothPeers.containsKey(peerId);
+
+  /// Messages from [peerId] we haven't viewed yet.
+  int unreadCount(String peerId) =>
+      (_history[peerId] ?? const []).where((m) => m['isOutgoing'] != true && m['seen'] != true).length;
 
   /// Every known peer, reachable ones first.
   List<Map<String, dynamic>> get peers {
@@ -251,7 +290,8 @@ class ApplicationAPI {
   void _publishPeerChanges() {
     for (final status in peers) {
       final id = status['id'] as String;
-      final signature = '${status['name']}|${status['wifi']}|${status['bt']}';
+      final signature =
+          '${status['name']}|${status['wifi']}|${status['bt']}|${status['mesh']}|${status['unread']}';
       if (_publishedStatus[id] == signature) continue;
       _publishedStatus[id] = signature;
       for (final cb in List.of(_peerUpdateCallbacks)) {
@@ -296,26 +336,58 @@ class ApplicationAPI {
       _btRetryAt.remove(key);
       _nearbySince.remove(key);
       _rememberContact(key, handle: validateHandle(name) == null ? name : null, addrs: addrs);
+      unawaited(_syncBluetoothNeighbors());
       _publishPeerChanges();
     };
 
+    // Everything on a Bluetooth link is a mesh frame for the node, which
+    // verifies it and either delivers it to us or relays it onward
     _bleService.onBluetoothMessageReceived = (data) {
-      // Native side sends epoch millis; normalise to ISO-8601 like the Go backend
-      final millis = int.tryParse(data['timestamp']?.toString() ?? '');
-      final msg = {
-        ...data,
-        'timestamp': (millis != null
-                ? DateTime.fromMillisecondsSinceEpoch(millis)
-                : DateTime.now())
-            .toIso8601String(),
-      };
-      _dispatchIncoming(msg);
+      final from = data['from'] as String? ?? '';
+      final frame = data['content'] as String? ?? '';
+      if (from.isEmpty || frame.isEmpty) return;
+      _service.bluetoothInbox(from, frame).catchError((Object e) {
+        debugPrint('Node rejected Bluetooth frame from $from: $e');
+      });
     };
 
     _bleService.onBluetoothPeerDisconnected = (data) {
       final peerId = data['peerId'] as String? ?? '';
-      if (_bluetoothPeers.remove(peerId) != null) _publishPeerChanges();
+      if (_bluetoothPeers.remove(peerId) != null) {
+        unawaited(_syncBluetoothNeighbors());
+        _publishPeerChanges();
+      }
     };
+  }
+
+  /// Tells the node which peers it can reach over our Bluetooth links.
+  Future<void> _syncBluetoothNeighbors() async {
+    try {
+      await _service.setBluetoothPeers(_bluetoothPeers.keys.toList());
+    } catch (e) {
+      debugPrint('Could not update Bluetooth neighbours: $e');
+    }
+  }
+
+  /// Carries the node's outgoing frames over our Bluetooth links until
+  /// polling stops. Each native send waits for the next phone's ack.
+  Future<void> _runBluetoothBridge() async {
+    if (_bridgeRunning) return;
+    _bridgeRunning = true;
+    while (_bridgeRunning) {
+      try {
+        final frames = await _service.bluetoothOutbox();
+        for (final frame in frames) {
+          try {
+            await _bleService.sendBluetoothMessage(frame.to, frame.data);
+          } catch (e) {
+            debugPrint('Bluetooth frame to ${frame.to} not delivered: $e');
+          }
+        }
+      } catch (e) {
+        await Future.delayed(const Duration(seconds: 1)); // node not up yet
+      }
+    }
   }
 
   void _onNearbyNodes(List<NearbyNode> nodes) {
@@ -366,15 +438,16 @@ class ApplicationAPI {
   }
 
   /// Makes sure there's a Bluetooth link to [peerId], scanning briefly if it
-  /// hasn't been seen nearby yet. Returns whether a link is up.
-  Future<bool> _linkBluetooth(String peerId) async {
+  /// hasn't been seen nearby yet (unless [scan] is false). Returns whether a
+  /// link is up.
+  Future<bool> _linkBluetooth(String peerId, {bool scan = true}) async {
     if (_bluetoothPeers.containsKey(peerId)) return true;
     if (!Platform.isAndroid) return false;
     if (_btDialing.contains(peerId)) {
       return _waitFor(() => _bluetoothPeers.containsKey(peerId), const Duration(seconds: 5));
     }
     var node = _nearbyNodeFor(peerId);
-    if (node == null) {
+    if (node == null && scan) {
       _lastScanAt = DateTime.now();
       unawaited(_bleService.startScan(timeout: const Duration(seconds: 8)));
       await _waitFor(() => _nearbyNodeFor(peerId) != null, const Duration(seconds: 6));
@@ -425,6 +498,18 @@ class ApplicationAPI {
 
     // Our Wi-Fi address can change (new network, DHCP); keep handshakes current
     if (_maintenanceTicks % 10 == 0) unawaited(_refreshOwnAddrs());
+
+    // Read receipts that couldn't be delivered when the chat was viewed
+    if (_maintenanceTicks % 10 == 5) {
+      for (final peerId in _history.keys.toList()) {
+        if (peerStatus(peerId)['online'] == true) unawaited(_sendPendingReadReceipts(peerId));
+      }
+    }
+
+    // Keep the node's view of our Bluetooth links right even if it restarted,
+    // and let "via mesh" statuses expire
+    if (Platform.isAndroid) unawaited(_syncBluetoothNeighbors());
+    _publishPeerChanges();
   }
 
   /// Moves known peers back onto Wi-Fi when it's available, using the
@@ -455,53 +540,168 @@ class ApplicationAPI {
 
   // ── Messages ────────────────────────────────────────────────────────────────
 
-  void _dispatchIncoming(Map<String, dynamic> msg) {
-    final from = msg['from'] as String? ?? '';
-    if (from.isNotEmpty) {
-      _history.putIfAbsent(from, () => []).add({
-        'content': msg['content'] ?? '',
-        'isOutgoing': false,
-        'timestamp': DateTime.tryParse(msg['timestamp'] ?? '') ?? DateTime.now(),
-      });
+  Future<void> _loadHistory() async {
+    final stored = await _chatStore.loadAll();
+    stored.forEach((peerId, messages) {
+      final list = _history.putIfAbsent(peerId, () => []);
+      for (final m in messages) {
+        if (_messageIndex.containsKey(m['id'])) continue;
+        // The app closed mid-send, so we can't know whether it went out
+        if (m['status'] == 'sending') {
+          m['status'] = 'failed';
+          unawaited(_chatStore.save(m));
+        }
+        _messageIndex[m['id'] as String] = m;
+        list.add(m);
+      }
+      list.sort((a, b) => (a['timestamp'] as DateTime).compareTo(b['timestamp'] as DateTime));
+      _notifyHistory(peerId);
+    });
+  }
+
+  void _addMessage(Map<String, dynamic> message) {
+    final peerId = message['peerId'] as String;
+    _messageIndex[message['id'] as String] = message;
+    _history.putIfAbsent(peerId, () => []).add(message);
+    unawaited(_chatStore.save(message));
+    _notifyHistory(peerId);
+  }
+
+  static const _statusRank = {'failed': 0, 'sending': 1, 'sent': 2, 'delivered': 3, 'read': 4};
+
+  /// Moves an outgoing message forward to [status] (never backwards: a late
+  /// "sent" must not undo a receipt that already arrived).
+  void _advanceStatus(Map<String, dynamic> message, String status) {
+    if ((_statusRank[status] ?? 0) <= (_statusRank[message['status']] ?? 0)) return;
+    message['status'] = status;
+    unawaited(_chatStore.save(message));
+    _notifyHistory(message['peerId'] as String);
+  }
+
+  void _notifyHistory(String peerId) {
+    for (final cb in List.of(_historyCallbacks)) {
+      cb(peerId);
     }
+    _publishPeerChanges(); // unread counts
+  }
+
+  /// A message the node delivered to us: over Wi-Fi, Bluetooth, or relayed.
+  void _dispatchIncoming(ChatMessage msg) {
+    final id = msg.msgId ?? 'node-${msg.id}-${msg.timestamp.millisecondsSinceEpoch}';
+    if (_messageIndex.containsKey(id)) return; // already have it, e.g. refetched after a restart
+    final handle = msg.handle;
+    _rememberContact(msg.from, handle: handle != null && validateHandle(handle) == null ? handle : null);
+    if (msg.isRelayed) _relayedSeen[msg.from] = DateTime.now();
+    _addMessage({
+      'id': id,
+      'peerId': msg.from,
+      'content': msg.content,
+      'isOutgoing': false,
+      'timestamp': msg.timestamp,
+      'status': 'received',
+      'seen': false,
+      'readSent': false,
+    });
     for (final cb in List.of(_messageCallbacks)) {
-      cb(msg);
+      cb({'id': id, 'from': msg.from, 'content': msg.content, 'timestamp': msg.timestamp.toIso8601String()});
     }
   }
 
-  /// Messages exchanged with [peerId] so far, oldest first.
+  void _applyReceipt(Receipt receipt) {
+    if (receipt.isRelayed) _relayedSeen[receipt.from] = DateTime.now();
+    for (final id in receipt.ids) {
+      final message = _messageIndex[id];
+      // Only the peer the message went to can confirm it
+      if (message == null || message['isOutgoing'] != true || message['peerId'] != receipt.from) continue;
+      _advanceStatus(message, receipt.status == 'read' ? 'read' : 'delivered');
+    }
+  }
+
+  @visibleForTesting
+  void receiveFromNode(ChatMessage msg) => _dispatchIncoming(msg);
+
+  @visibleForTesting
+  void receiveReceiptFromNode(Receipt receipt) => _applyReceipt(receipt);
+
+  /// Messages exchanged with [peerId] so far, oldest first. See [ChatStore]
+  /// for the shape of each message.
   List<Map<String, dynamic>> historyFor(String peerId) =>
       List.unmodifiable(_history[peerId] ?? const []);
 
-  void _startPolling() {
-    // Poll the local node every second: new messages, and which peers it is
-    // connected to (it drops unresponsive peers within seconds)
-    _messagePollTimer?.cancel();
-    _messagePollTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
-      if (_pollingMessages) return;
-      _pollingMessages = true;
-      try {
-        final messages = await _service.getMessages(afterId: _lastMessageId);
-        for (final msg in messages) {
-          if (msg.id > _lastMessageId) {
-            _lastMessageId = msg.id;
-          }
-          final map = {
-            'id': msg.id,
-            'from': msg.from,
-            'content': msg.content,
-            'timestamp': msg.timestamp.toIso8601String(),
-          };
-          _dispatchIncoming(map);
-        }
-      } catch (_) {
-      } finally {
-        _pollingMessages = false;
+  /// Called with a peer ID whenever that conversation changes: new messages,
+  /// status ticks, or messages marked read.
+  void onHistoryChanged(void Function(String peerId) callback) {
+    if (!_historyCallbacks.contains(callback)) _historyCallbacks.add(callback);
+  }
+
+  void removeOnHistoryChanged(void Function(String peerId) callback) {
+    _historyCallbacks.remove(callback);
+  }
+
+  /// Marks [peerId]'s messages as seen and, if read receipts are on, tells
+  /// the sender (relayed if need be). Call while their chat is on screen.
+  Future<void> markRead(String peerId) async {
+    var changed = false;
+    for (final m in _history[peerId] ?? const <Map<String, dynamic>>[]) {
+      if (m['isOutgoing'] != true && m['seen'] != true) {
+        m['seen'] = true;
+        unawaited(_chatStore.save(m));
+        changed = true;
       }
-    });
+    }
+    if (changed) _notifyHistory(peerId);
+    await _sendPendingReadReceipts(peerId);
+  }
+
+  /// Sends read receipts for seen messages the sender hasn't heard about yet;
+  /// ones that can't be delivered now are retried later.
+  Future<void> _sendPendingReadReceipts(String peerId) async {
+    final pending = (_history[peerId] ?? const <Map<String, dynamic>>[])
+        .where((m) => m['isOutgoing'] != true && m['seen'] == true && m['readSent'] != true)
+        .toList();
+    if (pending.isEmpty || !_markingRead.add(peerId)) return;
+    try {
+      if (SettingsStore().getBool(SettingsStore.readReceipts, fallback: true)) {
+        await _service.sendReceipt(peerId, [for (final m in pending) m['id'] as String], 'read');
+      }
+      for (final m in pending) {
+        m['readSent'] = true;
+        unawaited(_chatStore.save(m));
+      }
+    } catch (e) {
+      debugPrint('Read receipt to $peerId not sent yet: $e');
+    } finally {
+      _markingRead.remove(peerId);
+    }
+  }
+
+  void _startPolling() {
+    // Poll the local node every second: new messages and receipts, and which
+    // peers it is connected to (it drops unresponsive peers within seconds)
+    _messagePollTimer?.cancel();
+    _messagePollTimer = Timer.periodic(const Duration(seconds: 1), (_) => _pollNode());
 
     _peerPollTimer?.cancel();
     _peerPollTimer = Timer.periodic(const Duration(seconds: 1), (_) => _refreshWifiPeers());
+  }
+
+  Future<void> _pollNode() async {
+    if (_pollingMessages) return;
+    _pollingMessages = true;
+    try {
+      for (final msg in await _service.getMessages(afterId: _lastMessageId)) {
+        if (msg.id > _lastMessageId) _lastMessageId = msg.id;
+        _dispatchIncoming(msg);
+      }
+      for (final receipt in await _service.getReceipts(afterId: _lastReceiptId)) {
+        if (receipt.id > _lastReceiptId) _lastReceiptId = receipt.id;
+        _applyReceipt(receipt);
+      }
+    } catch (_) {
+      // Node unreachable; try again next tick
+    } finally {
+      _pollingMessages = false;
+    }
   }
 
   /// Backend service accessor
@@ -603,59 +803,42 @@ class ApplicationAPI {
     return peerId;
   }
 
-  /// Send message to peer: Wi-Fi when connected, Bluetooth otherwise or when
-  /// the Wi-Fi send isn't acknowledged
+  /// Sends [msg] to [peerId] by the best path the node has: Wi-Fi, a
+  /// Bluetooth link, or relayed through other peers when there's no direct
+  /// link. Its status goes sending → sent, then delivered and read as
+  /// receipts come back; failed if no path exists right now.
   Future<void> sendMessage(String msg, String peerId) async {
-    final entry = <String, dynamic>{
+    final message = <String, dynamic>{
+      'id': _uuid.v4(),
+      'peerId': peerId,
       'content': msg,
       'isOutgoing': true,
       'timestamp': DateTime.now(),
+      'status': 'sending',
+      'seen': true,
+      'readSent': false,
     };
-    _history.putIfAbsent(peerId, () => []).add(entry);
+    _addMessage(message);
     try {
-      await _deliver(msg, peerId);
-    } catch (_) {
-      // Keep the failure visible in the thread, not just in a transient snackbar
-      entry['failed'] = true;
+      // A direct Bluetooth link beats a relay when the peer is close by
+      if (!_wifiPeers.contains(peerId) && !_bluetoothPeers.containsKey(peerId)) {
+        await _linkBluetooth(peerId, scan: false);
+      }
+      if (Platform.isAndroid) await _syncBluetoothNeighbors();
+      await _service.sendChat(peerId, msg, id: message['id'] as String);
+      _advanceStatus(message, 'sent');
+    } catch (e) {
+      // A receipt may already have proven it arrived; only an unconfirmed send failed
+      if (message['status'] == 'sending') {
+        message['status'] = 'failed';
+        unawaited(_chatStore.save(message));
+        _notifyHistory(peerId);
+      }
+      if (e is ApiException && e.message.contains('no connected peers')) {
+        throw ApiException('${displayName(peerId)} is out of reach: no Wi-Fi, Bluetooth or relay path right now');
+      }
       rethrow;
     }
-  }
-
-  Future<void> _deliver(String msg, String peerId) async {
-    // Sends are acknowledged end to end on both transports, so a link that
-    // died silently fails here instead of swallowing the message.
-    var triedWifi = false;
-    if (_wifiPeers.contains(peerId)) {
-      triedWifi = true;
-      try {
-        await _service.sendMessage(peerId, msg);
-        return;
-      } catch (e) {
-        debugPrint('Wi-Fi send to $peerId failed ($e); switching to Bluetooth');
-        // The node has closed the dead link; reflect that right away
-        _wifiPeers.remove(peerId);
-        _publishPeerChanges();
-      }
-    }
-
-    // No Bluetooth link yet: make one if the peer is in range
-    if (await _linkBluetooth(peerId)) {
-      try {
-        if (await _bleService.sendBluetoothMessage(peerId, msg)) return;
-      } catch (e) {
-        debugPrint('Bluetooth send to $peerId failed: $e');
-      }
-    }
-
-    // Last resort: the node may still reach an address it knows
-    if (!triedWifi) {
-      try {
-        await _service.sendMessage(peerId, msg);
-        unawaited(_refreshWifiPeers());
-        return;
-      } catch (_) {}
-    }
-    throw ApiException('${displayName(peerId)} is not reachable over Wi-Fi or Bluetooth right now');
   }
 
   /// Register callback for incoming messages
@@ -683,6 +866,7 @@ class ApplicationAPI {
   }
 
   void stopPolling() {
+    _bridgeRunning = false;
     _messagePollTimer?.cancel();
     _peerPollTimer?.cancel();
     _maintenanceTimer?.cancel();

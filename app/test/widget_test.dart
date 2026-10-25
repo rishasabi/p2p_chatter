@@ -99,6 +99,33 @@ void main() {
       });
       expect(msg.content, 'hello mesh');
       expect(msg.isOutgoing, isFalse);
+      expect(msg.isRelayed, isFalse);
+
+      final relayed = ChatMessage.fromJson({
+        'id': 2,
+        'from': '12D3KooWPeer',
+        'content': 'via a friend',
+        'timestamp': '2026-10-13T12:00:00Z',
+        'msg_id': 'abc',
+        'handle': 'erin',
+        'via': '12D3KooWRelay',
+      });
+      expect(relayed.msgId, 'abc');
+      expect(relayed.handle, 'erin');
+      expect(relayed.isRelayed, isTrue);
+    });
+
+    test('Receipt parses JSON correctly', () {
+      final r = Receipt.fromJson({
+        'id': 3,
+        'from': '12D3KooWPeer',
+        'ids': ['a', 'b'],
+        'status': 'read',
+        'timestamp': '2026-10-13T12:00:00Z',
+      });
+      expect(r.ids, ['a', 'b']);
+      expect(r.status, 'read');
+      expect(r.isRelayed, isFalse);
     });
   });
 
@@ -142,7 +169,7 @@ void main() {
     });
   });
 
-  group('ApplicationAPI Bluetooth messages', () {
+  group('ApplicationAPI', () {
     TestWidgetsFlutterBinding.ensureInitialized();
 
     // Simulates MainActivity invoking a callback on the Bluetooth method channel
@@ -154,22 +181,72 @@ void main() {
           (_) {},
         );
 
-    test('message received with no chat open is kept in history', () async {
-      final api = ApplicationAPI()..stopPolling();
-      final ts = DateTime.utc(2026, 1, 2, 3, 4, 5);
+    // A message as the node hands it over from GET /messages
+    ChatMessage fromNode(String from, String msgId, String content, {String? via, String? handle}) =>
+        ChatMessage(
+          id: 0,
+          from: from,
+          content: content,
+          timestamp: DateTime.utc(2026, 1, 2, 3, 4, 5),
+          msgId: msgId,
+          via: via,
+          handle: handle,
+        );
 
-      await nativeCall('onBluetoothMessageReceived', {
-        'from': '12D3KooWBtPeer',
-        'content': 'over the air',
-        'timestamp': ts.millisecondsSinceEpoch.toString(),
-        'id': 1,
-      });
+    test('message received with no chat open is kept in history, once', () {
+      final api = ApplicationAPI()..stopPolling();
+      api.receiveFromNode(fromNode('12D3KooWBtPeer', 'm-1', 'over the air', handle: 'dave'));
+      api.receiveFromNode(fromNode('12D3KooWBtPeer', 'm-1', 'over the air')); // refetched
 
       final history = api.historyFor('12D3KooWBtPeer');
       expect(history, hasLength(1));
       expect(history.single['content'], 'over the air');
       expect(history.single['isOutgoing'], isFalse);
-      expect((history.single['timestamp'] as DateTime).toUtc(), ts);
+      expect(history.single['status'], 'received');
+      expect(api.displayName('12D3KooWBtPeer'), 'dave'); // the sender's signed handle
+      expect(api.unreadCount('12D3KooWBtPeer'), 1);
+    });
+
+    test('viewing a chat clears unread even if the read receipt has to wait', () async {
+      final api = ApplicationAPI()..stopPolling();
+      api.receiveFromNode(fromNode('12D3KooWReader', 'r-1', 'one'));
+      api.receiveFromNode(fromNode('12D3KooWReader', 'r-2', 'two'));
+      expect(api.unreadCount('12D3KooWReader'), 2);
+
+      await api.markRead('12D3KooWReader'); // no node in tests, so the receipt can't go out
+      expect(api.unreadCount('12D3KooWReader'), 0);
+      expect(api.historyFor('12D3KooWReader').any((m) => m['readSent'] == true), isFalse,
+          reason: 'unsent read receipts are retried later');
+    });
+
+    test('a relayed message shows the peer as reachable via mesh', () {
+      final api = ApplicationAPI()..stopPolling();
+      api.receiveFromNode(fromNode('12D3KooWFarPeer', 'f-1', 'hi from afar', via: '12D3KooWRelay'));
+      final status = api.peerStatus('12D3KooWFarPeer');
+      expect(status['type'], 'VIA MESH');
+      expect(status['online'], isTrue);
+    });
+
+    test('receipts move a sent message forward, never back, and only from its recipient', () async {
+      final api = ApplicationAPI()..stopPolling();
+      const peer = '12D3KooWReceiptPeer';
+      // No node in tests, so the send itself fails
+      await expectLater(api.sendMessage('anyone there?', peer), throwsA(isA<ApiException>()));
+      final msg = api.historyFor(peer).last;
+      final id = msg['id'] as String;
+      expect(msg['content'], 'anyone there?');
+      expect(msg['status'], 'failed');
+
+      api.receiveReceiptFromNode(Receipt(id: 1, from: '12D3KooWSomeoneElse', ids: [id], status: 'read'));
+      expect(msg['status'], 'failed');
+
+      // A receipt from the recipient proves it arrived after all
+      api.receiveReceiptFromNode(Receipt(id: 2, from: peer, ids: [id], status: 'delivered'));
+      expect(msg['status'], 'delivered');
+      api.receiveReceiptFromNode(Receipt(id: 3, from: peer, ids: [id], status: 'read'));
+      expect(msg['status'], 'read');
+      api.receiveReceiptFromNode(Receipt(id: 4, from: peer, ids: [id], status: 'delivered'));
+      expect(msg['status'], 'read');
     });
 
     test('handles are validated', () {
@@ -210,24 +287,6 @@ void main() {
       api.removeOnPeerUpdate(listener);
     });
 
-    test('send to a dropped Bluetooth peer fails clearly and is marked', () async {
-      final api = ApplicationAPI()..stopPolling();
-      await nativeCall('onBluetoothPeerConnected', {
-        'peerId': '12D3KooWGonePeer',
-        'name': 'Gone Phone',
-        'address': 'AA:BB:CC:DD:EE:FF',
-      });
-      await nativeCall('onBluetoothPeerDisconnected', {'peerId': '12D3KooWGonePeer'});
-
-      await expectLater(
-        api.sendMessage('anyone there?', '12D3KooWGonePeer'),
-        throwsA(isA<ApiException>()
-            .having((e) => e.message, 'message', contains('Bluetooth'))),
-      );
-      final last = api.historyFor('12D3KooWGonePeer').last;
-      expect(last['content'], 'anyone there?');
-      expect(last['failed'], isTrue);
-    });
   });
 
   group('Widget tests', () {

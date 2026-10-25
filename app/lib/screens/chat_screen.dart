@@ -17,23 +17,29 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
+class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final TextEditingController _msgController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final ApplicationAPI api = ApplicationAPI();
   // Live status: name (handle) and which transports reach the peer right now
   late Map<String, dynamic> _status;
-  final List<Map<String, dynamic>> _messages = [];
+  // The stored conversation; ApplicationAPI owns it and tells us when it changes
+  List<Map<String, dynamic>> _messages = const [];
   bool _isSending = false;
 
   @override
   void initState() {
     super.initState();
     _status = api.peerStatus(widget.peerId);
-    _messages.addAll(api.historyFor(widget.peerId));
+    _messages = api.historyFor(widget.peerId);
 
     api.onPeerUpdate(_handlePeerUpdate);
-    api.onMessage(_handleIncomingMessage);
+    api.onHistoryChanged(_handleHistoryChanged);
+    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollToBottom();
+      _markRead();
+    });
   }
 
   void _handlePeerUpdate(Map<String, dynamic> update) {
@@ -42,29 +48,55 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  void _handleHistoryChanged(String peerId) {
+    if (!mounted || peerId != widget.peerId) return;
+    final grew = api.historyFor(peerId).length > _messages.length;
+    setState(() => _messages = api.historyFor(peerId));
+    if (grew) {
+      _scrollToBottom();
+      _markRead(); // arrived while we're looking at the chat
+    }
+  }
+
+  // Only count messages as read while the user can actually see them
+  void _markRead() {
+    final state = WidgetsBinding.instance.lifecycleState;
+    if (state == null || state == AppLifecycleState.resumed) {
+      api.markRead(widget.peerId);
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _markRead();
+  }
+
   bool get _isOnline => _status['online'] == true;
 
   String get _peerName => _status['name'] as String? ?? widget.peerName;
 
+  /// Delivery ticks for an outgoing message: clock while sending, one tick
+  /// once the network took it, two once it arrived, green two once read.
+  static Widget _statusIcon(String? status) {
+    const muted = Colors.white70;
+    switch (status) {
+      case 'read':
+        return const Icon(Icons.done_all, size: 14, color: Color(0xFF4ADE80), semanticLabel: 'read');
+      case 'delivered':
+        return const Icon(Icons.done_all, size: 14, color: muted, semanticLabel: 'delivered');
+      case 'sent':
+        return const Icon(Icons.check, size: 14, color: muted, semanticLabel: 'sent');
+      default:
+        return const Icon(Icons.schedule, size: 12, color: muted, semanticLabel: 'sending');
+    }
+  }
+
   String get _statusText {
     if (!_isOnline) return 'Offline';
+    if (_status['mesh'] == true) return 'Online · via mesh relay';
     final wifi = _status['wifi'] == true;
     final bt = _status['bt'] == true;
     return 'Online · ${wifi && bt ? 'Wi-Fi + Bluetooth' : wifi ? 'Wi-Fi' : 'Bluetooth'}';
-  }
-
-  void _handleIncomingMessage(Map<String, dynamic> msg) {
-    if (!mounted) return;
-    if (msg['from'] == widget.peerId) {
-      setState(() {
-        _messages.add({
-          'content': msg['content'] ?? '',
-          'isOutgoing': false,
-          'timestamp': DateTime.tryParse(msg['timestamp'] ?? '') ?? DateTime.now(),
-        });
-      });
-      _scrollToBottom();
-    }
   }
 
   void _scrollToBottom() {
@@ -84,22 +116,13 @@ class _ChatScreenState extends State<ChatScreen> {
     if (text.isEmpty || _isSending) return;
 
     _msgController.clear();
-    final entry = <String, dynamic>{
-      'content': text,
-      'isOutgoing': true,
-      'timestamp': DateTime.now(),
-    };
-    setState(() {
-      _isSending = true;
-      _messages.add(entry);
-    });
-    _scrollToBottom();
+    setState(() => _isSending = true);
 
     try {
+      // Adds the message to the conversation right away, then updates its status
       await api.sendMessage(text, widget.peerId);
     } catch (e) {
       if (mounted) {
-        setState(() => entry['failed'] = true);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             backgroundColor: Colors.red.shade900,
@@ -117,8 +140,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     api.removeOnPeerUpdate(_handlePeerUpdate);
-    api.removeOnMessage(_handleIncomingMessage);
+    api.removeOnHistoryChanged(_handleHistoryChanged);
     _msgController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -187,7 +211,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     itemBuilder: (context, index) {
                       final item = _messages[index];
                       final bool isOut = item['isOutgoing'] == true;
-                      final bool failed = item['failed'] == true;
+                      final bool failed = item['status'] == 'failed';
                       final DateTime time = item['timestamp'] as DateTime;
                       // The Go node stamps messages in UTC; show local time
                       final timeStr = DateFormat('HH:mm').format(time.toLocal());
@@ -233,6 +257,10 @@ class _ChatScreenState extends State<ChatScreen> {
                                           : (isOut ? Colors.white70 : Colors.grey.shade500),
                                     ),
                                   ),
+                                  if (isOut && !failed) ...[
+                                    const SizedBox(width: 4),
+                                    _statusIcon(item['status'] as String?),
+                                  ],
                                 ],
                               ),
                             ],

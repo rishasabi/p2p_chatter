@@ -101,7 +101,8 @@ class _MeshScreenState extends State<MeshScreen> {
                 hintStyle: const TextStyle(color: Colors.grey),
                 prefixIcon: const Icon(Icons.search, color: Colors.grey),
                 filled: true,
-                fillColor: const Color(0xFF1E1A17),
+                // Theme surface: the same dark fill in dark mode, light in light mode
+                fillColor: Theme.of(context).colorScheme.surface,
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(12),
                   borderSide: BorderSide.none,
@@ -166,6 +167,7 @@ class _MeshScreenState extends State<MeshScreen> {
                             final name = peer['name'] ?? 'Peer';
                             final initial = name.length >= 2 ? name.substring(0, 2) : name;
                             final isOnline = peer['online'] == true;
+                            final unread = peer['unread'] as int? ?? 0;
 
                             return ListTile(
                               leading: CircleAvatar(
@@ -177,10 +179,29 @@ class _MeshScreenState extends State<MeshScreen> {
                                 '${peer['type'] ?? 'OFFLINE'} · ${(peer['id'] as String).length > 12 ? '${(peer['id'] as String).substring(0, 12)}…' : peer['id']}',
                                 style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
                               ),
-                              trailing: Icon(
-                                Icons.circle, 
-                                size: 10, 
-                                color: isOnline ? const Color(0xFF4ADE80) : Colors.grey
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (unread > 0)
+                                    Container(
+                                      margin: const EdgeInsets.only(right: 10),
+                                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFF935F32),
+                                        borderRadius: BorderRadius.circular(10),
+                                      ),
+                                      child: Text(
+                                        '$unread',
+                                        semanticsLabel: '$unread unread',
+                                        style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
+                                      ),
+                                    ),
+                                  Icon(
+                                    Icons.circle,
+                                    size: 10,
+                                    color: isOnline ? const Color(0xFF4ADE80) : Colors.grey,
+                                  ),
+                                ],
                               ),
                               onTap: () => Navigator.push(context, MaterialPageRoute(
                                 builder: (_) => ChatScreen(peerName: name, peerId: peer['id']),
