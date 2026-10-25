@@ -8,6 +8,10 @@ import android.bluetooth.BluetoothSocket
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -288,8 +292,52 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
 
+                "showMessageNotification" -> {
+                    showMessageNotification(
+                        call.argument<String>("peerId") ?: "",
+                        call.argument<String>("title") ?: "Chatter",
+                        call.argument<String>("body") ?: "",
+                    )
+                    result.success(null)
+                }
+
                 else -> result.notImplemented()
             }
+        }
+    }
+
+    // One notification per conversation (tagged by peer ID), replaced by the
+    // newest message; tapping it brings the app back.
+    private fun showMessageNotification(peerId: String, title: String, body: String) {
+        val manager = getSystemService(NotificationManager::class.java) ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            manager.createNotificationChannel(
+                NotificationChannel("messages", "Messages", NotificationManager.IMPORTANCE_HIGH)
+            )
+        }
+        val open = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_IMMUTABLE,
+        )
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, "messages")
+        } else {
+            @Suppress("DEPRECATION") Notification.Builder(this)
+        }
+        val notification = builder
+            .setSmallIcon(R.drawable.ic_notification)
+            .setColor(0xFFFFB547.toInt())
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(Notification.BigTextStyle().bigText(body))
+            .setAutoCancel(true)
+            .setContentIntent(open)
+            .build()
+        try {
+            manager.notify(peerId, 1, notification)
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Notifications not allowed: ${e.message}")
         }
     }
 

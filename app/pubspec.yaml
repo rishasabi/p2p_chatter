@@ -38,7 +38,40 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  integration_test:
+    sdk: flutter
+  flutter_driver:
+    sdk: flutter
   flutter_lints: ^5.0.0
 
 flutter:
   uses-material-design: true
+
+  assets:
+    - assets/fonts/OFL-Unbounded.txt
+    - assets/fonts/OFL-Figtree.txt
+
+  # Both under the SIL Open Font License (see assets/fonts/OFL-*.txt). Bundled
+  # rather than fetched: Chatter has to work with no internet at all.
+  fonts:
+    # Display: wordmark, titles, headings and buttons
+    - family: Unbounded
+      fonts:
+        - asset: assets/fonts/Unbounded-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Unbounded-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/Unbounded-Bold.ttf
+          weight: 700
+    # Text: messages and everything else
+    - family: Figtree
+      fonts:
+        - asset: assets/fonts/Figtree-Regular.ttf
+        - asset: assets/fonts/Figtree-Italic.ttf
+          style: italic
+        - asset: assets/fonts/Figtree-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Figtree-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/Figtree-Bold.ttf
+          weight: 700

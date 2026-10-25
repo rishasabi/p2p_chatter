@@ -130,6 +130,7 @@ class ApplicationAPI {
       }
     }
     await _shareIdentity(info);
+    unawaited(_resendUndelivered());
 
     if (Platform.isAndroid) {
       _nearbySubscription ??= _bleService.nearbyNodes.listen(_onNearbyNodes);
@@ -567,7 +568,7 @@ class ApplicationAPI {
     _notifyHistory(peerId);
   }
 
-  static const _statusRank = {'failed': 0, 'sending': 1, 'sent': 2, 'delivered': 3, 'read': 4};
+  static const _statusRank = {'failed': 0, 'sending': 1, 'queued': 2, 'sent': 3, 'delivered': 4, 'read': 5};
 
   /// Moves an outgoing message forward to [status] (never backwards: a late
   /// "sent" must not undo a receipt that already arrived).
@@ -805,9 +806,11 @@ class ApplicationAPI {
 
   /// Sends [msg] to [peerId] by the best path the node has: Wi-Fi, a
   /// Bluetooth link, or relayed through other peers when there's no direct
-  /// link. Its status goes sending → sent, then delivered and read as
-  /// receipts come back; failed if no path exists right now.
-  Future<void> sendMessage(String msg, String peerId) async {
+  /// link. Its status goes sending → sent (or queued when no one is in range:
+  /// the node keeps it and hands it on when someone is), then delivered and
+  /// read as receipts come back; failed only if the node itself errors.
+  /// Returns the status it reached.
+  Future<String> sendMessage(String msg, String peerId) async {
     final message = <String, dynamic>{
       'id': _uuid.v4(),
       'peerId': peerId,
@@ -825,8 +828,9 @@ class ApplicationAPI {
         await _linkBluetooth(peerId, scan: false);
       }
       if (Platform.isAndroid) await _syncBluetoothNeighbors();
-      await _service.sendChat(peerId, msg, id: message['id'] as String);
-      _advanceStatus(message, 'sent');
+      final status = await _service.sendChat(peerId, msg, id: message['id'] as String);
+      _advanceStatus(message, status == 'queued' ? 'queued' : 'sent');
+      return message['status'] as String;
     } catch (e) {
       // A receipt may already have proven it arrived; only an unconfirmed send failed
       if (message['status'] == 'sending') {
@@ -834,10 +838,25 @@ class ApplicationAPI {
         unawaited(_chatStore.save(message));
         _notifyHistory(peerId);
       }
-      if (e is ApiException && e.message.contains('no connected peers')) {
-        throw ApiException('${displayName(peerId)} is out of reach: no Wi-Fi, Bluetooth or relay path right now');
-      }
       rethrow;
+    }
+  }
+
+  /// The node keeps queued messages in memory only, so after a restart hand it
+  /// our undelivered ones again, including ones that failed for want of a path
+  /// (from before the node kept messages). Same IDs: anyone who already has
+  /// one ignores the repeat. 24 hours matches how long nodes carry messages.
+  Future<void> _resendUndelivered() async {
+    final cutoff = DateTime.now().subtract(const Duration(hours: 24));
+    for (final m in _messageIndex.values.toList()) {
+      final waiting = const {'queued', 'sent', 'failed'}.contains(m['status']);
+      if (m['isOutgoing'] != true || !waiting || (m['timestamp'] as DateTime).isBefore(cutoff)) continue;
+      try {
+        final status = await _service.sendChat(m['peerId'] as String, m['content'] as String, id: m['id'] as String);
+        _advanceStatus(m, status == 'queued' ? 'queued' : 'sent');
+      } catch (e) {
+        debugPrint('Could not hand ${m['id']} to the node again: $e');
+      }
     }
   }
 

@@ -312,7 +312,7 @@ void main() {
       expect(find.byType(MaterialApp), findsOneWidget);
     });
 
-    testWidgets('MainNavigationScreen displays Chats, Discover, and Config tabs', (tester) async {
+    testWidgets('MainNavigationScreen displays Chats, Discover, and Settings tabs', (tester) async {
       final svc = mockApiService();
       await tester.pumpWidget(
         ProviderScope(
@@ -326,10 +326,10 @@ void main() {
 
       expect(find.text('Chats'), findsOneWidget);
       expect(find.text('Discover'), findsOneWidget);
-      expect(find.text('Config'), findsOneWidget);
+      expect(find.text('Settings'), findsOneWidget);
     });
 
-    testWidgets('Tapping Config tab navigates to Node Configuration', (tester) async {
+    testWidgets('Tapping Settings tab opens the settings screen', (tester) async {
       final svc = mockApiService();
       await tester.pumpWidget(
         ProviderScope(
@@ -340,11 +340,13 @@ void main() {
         ),
       );
       await tester.pump(const Duration(milliseconds: 100));
-      await tester.tap(find.text('Config'));
+      await tester.tap(find.text('Settings'));
       await tester.pumpAndSettle(const Duration(seconds: 1));
 
-      expect(find.text('Node Configuration'), findsOneWidget);
-      expect(find.text('Dark Theme'), findsOneWidget);
+      // The nav label and the screen title
+      expect(find.text('Settings'), findsNWidgets(2));
+      expect(find.text('Theme'), findsOneWidget);
+      expect(find.text('Dark'), findsOneWidget);
     });
   });
 }

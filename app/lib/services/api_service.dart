@@ -101,14 +101,15 @@ class ChatterApiService {
   }
 
   /// Sends [content] to [peerId] under message ID [id]. The node relays it
-  /// through other peers when there's no direct link. Returns the ID used.
+  /// through other peers when there's no direct link. Returns "sent", or
+  /// "queued" when no one is in range and the node is keeping it for later.
   Future<String> sendChat(String peerId, String content, {String? id}) async {
     final body = await _post('/message', {
       'peer_id': peerId,
       'content': content,
       if (id != null) 'id': id,
     });
-    return body['id'] as String? ?? id ?? '';
+    return body['status'] as String? ?? 'sent';
   }
 
   // ── Receipts ─────────────────────────────────────────────────────────────────

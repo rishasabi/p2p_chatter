@@ -127,6 +127,17 @@ class BleService {
     }
   }
 
+  /// Posts a system notification for a message from [peerId]. Here because
+  /// this is the app's one native channel.
+  Future<void> showMessageNotification({required String peerId, required String title, required String body}) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _advertiserChannel.invokeMethod('showMessageNotification', {'peerId': peerId, 'title': title, 'body': body});
+    } catch (e) {
+      debugPrint('Could not show notification: $e');
+    }
+  }
+
   /// Query local device Bluetooth name and MAC
   Future<Map<String, String>> getDeviceBluetoothInfo() async {
     if (!Platform.isAndroid) return {};

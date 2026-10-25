@@ -1,5 +1,10 @@
 import 'package:flutter/material.dart';
 import '../application_api.dart';
+import '../widgets/brand_mark.dart';
+import '../widgets/feedback.dart';
+import '../widgets/mesh_map.dart';
+import '../widgets/peer_display.dart';
+import '../widgets/time_format.dart';
 import 'chat_screen.dart';
 
 class MeshScreen extends StatefulWidget {
@@ -25,6 +30,7 @@ class _MeshScreenState extends State<MeshScreen> {
     _loadPeers();
     _searchController.addListener(_filterPeers);
     api.onPeerUpdate(_handlePeerUpdate);
+    api.onHistoryChanged(_handleHistoryChanged);
   }
 
   // Status changes are pushed as they happen (Wi-Fi or Bluetooth link up/down)
@@ -32,6 +38,11 @@ class _MeshScreenState extends State<MeshScreen> {
     if (!mounted) return;
     peers = api.peers;
     _filterPeers();
+  }
+
+  // Keeps each row's last-message preview current, including messages we send
+  void _handleHistoryChanged(String _) {
+    if (mounted) setState(() {});
   }
 
   Future<void> _loadPeers() async {
@@ -51,6 +62,11 @@ class _MeshScreenState extends State<MeshScreen> {
     }
   }
 
+  void _refresh() {
+    setState(() => _isLoading = true);
+    _loadPeers();
+  }
+
   void _filterPeers() {
     final query = _searchController.text.toLowerCase().trim();
     setState(() {
@@ -66,152 +82,278 @@ class _MeshScreenState extends State<MeshScreen> {
     });
   }
 
+  void _openChat(Map<String, dynamic> peer) {
+    FocusScope.of(context).unfocus();
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => ChatScreen(peerName: peer['name'] as String, peerId: peer['id'] as String)),
+    );
+  }
+
   @override
   void dispose() {
     api.removeOnPeerUpdate(_handlePeerUpdate);
+    api.removeOnHistoryChanged(_handleHistoryChanged);
     _searchController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final anyoneOnline = peers.any((p) => p['online'] == true);
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Chatter', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh, color: Colors.grey),
-            tooltip: 'Refresh peers',
-            onPressed: () {
-              setState(() => _isLoading = true);
-              _loadPeers();
-            },
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          // Search Bar
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-            child: TextField(
-              controller: _searchController,
-              decoration: InputDecoration(
-                hintText: 'Search peers...',
-                hintStyle: const TextStyle(color: Colors.grey),
-                prefixIcon: const Icon(Icons.search, color: Colors.grey),
-                filled: true,
-                // Theme surface: the same dark fill in dark mode, light in light mode
-                fillColor: Theme.of(context).colorScheme.surface,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide.none,
-                ),
-                contentPadding: const EdgeInsets.symmetric(vertical: 0),
+        title: Row(
+          children: [
+            const BrandMark(size: 30),
+            const SizedBox(width: 10),
+            // The wordmark shrinks to fit rather than truncating at large text sizes
+            Flexible(
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Text('Chatter', style: theme.textTheme.headlineMedium),
               ),
             ),
+          ],
+        ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh peers',
+            onPressed: _isLoading ? null : _refresh,
           ),
-          
-          // Threads List
-          Expanded(
-            child: RefreshIndicator(
-              color: const Color(0xFF935F32),
-              onRefresh: _loadPeers,
-              child: _isLoading && peers.isEmpty
-                  ? const Center(child: CircularProgressIndicator(color: Color(0xFF935F32)))
-                  : peers.isEmpty
-                      ? Center(
-                          child: SingleChildScrollView(
-                            physics: const AlwaysScrollableScrollPhysics(),
-                            child: Padding(
-                              padding: const EdgeInsets.all(32.0),
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(Icons.speaker_phone, size: 48, color: Colors.grey.shade600),
-                                  const SizedBox(height: 16),
-                                  const Text(
-                                    'No peers connected yet',
-                                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    'Scan a peer\'s code in the Discover tab to connect to the mesh network.',
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(color: Colors.grey.shade500, fontSize: 12),
-                                  ),
-                                  const SizedBox(height: 20),
-                                  OutlinedButton.icon(
-                                    icon: const Icon(Icons.refresh, size: 16),
-                                    label: const Text('Check again'),
-                                    onPressed: () {
-                                      setState(() => _isLoading = true);
-                                      _loadPeers();
-                                    },
-                                    style: OutlinedButton.styleFrom(
-                                      foregroundColor: const Color(0xFF935F32),
-                                      side: const BorderSide(color: Color(0xFF935F32)),
-                                    ),
-                                  ),
-                                ],
-                              ),
+          const SizedBox(width: 4),
+        ],
+      ),
+      body: RefreshIndicator(
+        onRefresh: _loadPeers,
+        child: CustomScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+          slivers: [
+            SliverToBoxAdapter(child: MeshMap(peers: peers, myName: api.myHandle ?? '')),
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(MeshMap.summary(peers), style: theme.textTheme.titleSmall),
+                    if (anyoneOnline) ...[
+                      const SizedBox(height: 8),
+                      const MeshLegend(),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            if (peers.isNotEmpty)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: TextField(
+                    controller: _searchController,
+                    textInputAction: TextInputAction.search,
+                    decoration: InputDecoration(
+                      hintText: 'Search by name or peer ID',
+                      prefixIcon: const Icon(Icons.search),
+                      suffixIcon: _searchController.text.isEmpty
+                          ? null
+                          : IconButton(
+                              icon: const Icon(Icons.close),
+                              tooltip: 'Clear search',
+                              onPressed: _searchController.clear,
                             ),
-                          ),
-                        )
-                      : ListView.builder(
-                          physics: const AlwaysScrollableScrollPhysics(),
-                          padding: const EdgeInsets.all(16),
-                          itemCount: filteredPeers.length,
-                          itemBuilder: (context, index) {
-                            final peer = filteredPeers[index];
-                            final name = peer['name'] ?? 'Peer';
-                            final initial = name.length >= 2 ? name.substring(0, 2) : name;
-                            final isOnline = peer['online'] == true;
-                            final unread = peer['unread'] as int? ?? 0;
+                    ),
+                  ),
+                ),
+              ),
+            // Reserved height, so the list doesn't jump when a refresh starts
+            SliverToBoxAdapter(
+              child: SizedBox(
+                height: 2,
+                child: _isLoading && peers.isNotEmpty ? const LinearProgressIndicator(minHeight: 2) : null,
+              ),
+            ),
+            ..._buildBody(),
+            const SliverPadding(padding: EdgeInsets.only(bottom: 16)),
+          ],
+        ),
+      ),
+    );
+  }
 
-                            return ListTile(
-                              leading: CircleAvatar(
-                                backgroundColor: const Color(0xFF1E1A17),
-                                child: Text(initial, style: const TextStyle(color: Colors.white, fontSize: 13)),
-                              ),
-                              title: Text(name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                              subtitle: Text(
-                                '${peer['type'] ?? 'OFFLINE'} · ${(peer['id'] as String).length > 12 ? '${(peer['id'] as String).substring(0, 12)}…' : peer['id']}',
-                                style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
-                              ),
-                              trailing: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  if (unread > 0)
-                                    Container(
-                                      margin: const EdgeInsets.only(right: 10),
-                                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFF935F32),
-                                        borderRadius: BorderRadius.circular(10),
-                                      ),
-                                      child: Text(
-                                        '$unread',
-                                        semanticsLabel: '$unread unread',
-                                        style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
-                                      ),
-                                    ),
-                                  Icon(
-                                    Icons.circle,
-                                    size: 10,
-                                    color: isOnline ? const Color(0xFF4ADE80) : Colors.grey,
-                                  ),
-                                ],
-                              ),
-                              onTap: () => Navigator.push(context, MaterialPageRoute(
-                                builder: (_) => ChatScreen(peerName: name, peerId: peer['id']),
-                              )),
-                            );
-                          },
-                        ),
+  List<Widget> _buildBody() {
+    if (_isLoading && peers.isEmpty) {
+      return const [
+        SliverToBoxAdapter(
+          child: StateMessage(fill: false, leading: CircularProgressIndicator(), title: 'Looking for your contacts'),
+        ),
+      ];
+    }
+    if (peers.isEmpty) {
+      return [
+        SliverToBoxAdapter(
+          child: StateMessage(
+            fill: false,
+            title: 'No chats yet',
+            body: 'Open Discover to scan a friend\'s code or find phones running Chatter nearby.',
+            action: OutlinedButton.icon(
+              icon: const Icon(Icons.refresh, size: 20),
+              label: const Text('Check again'),
+              onPressed: _refresh,
             ),
           ),
-        ],
+        ),
+      ];
+    }
+    if (filteredPeers.isEmpty) {
+      return [
+        SliverToBoxAdapter(
+          child: StateMessage(
+            fill: false,
+            icon: Icons.search_off,
+            title: 'No one matches "${_searchController.text.trim()}"',
+            body: 'Try a handle, or the first few characters of a peer ID.',
+          ),
+        ),
+      ];
+    }
+    return [
+      SliverList.separated(
+        itemCount: filteredPeers.length,
+        separatorBuilder: (_, __) => const Divider(indent: 86, endIndent: 20),
+        itemBuilder: (context, index) {
+          final peer = filteredPeers[index];
+          final history = api.historyFor(peer['id'] as String);
+          return _PeerRow(
+            key: ValueKey(peer['id']),
+            peer: peer,
+            lastMessage: history.isEmpty ? null : history.last,
+            onTap: () => _openChat(peer),
+          );
+        },
+      ),
+    ];
+  }
+}
+
+/// One conversation in the list: who, how they're reachable, the latest
+/// message and how many are unread.
+class _PeerRow extends StatelessWidget {
+  final Map<String, dynamic> peer;
+  final Map<String, dynamic>? lastMessage;
+  final VoidCallback onTap;
+
+  const _PeerRow({super.key, required this.peer, required this.lastMessage, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final id = peer['id'] as String;
+    final name = peer['name'] as String? ?? 'Peer';
+    final isOnline = peer['online'] == true;
+    final unread = peer['unread'] as int? ?? 0;
+    final last = lastMessage;
+
+    final String preview;
+    if (last == null) {
+      preview = reachSentence(peer);
+    } else {
+      final content = (last['content'] as String? ?? '').replaceAll('\n', ' ');
+      preview = last['isOutgoing'] == true
+          ? switch (last['status']) {
+              'failed' => 'Not delivered: $content',
+              'queued' => 'Waiting to send: $content',
+              _ => 'You: $content',
+            }
+          : content;
+    }
+    final time = last == null ? null : formatListTime(context, last['timestamp'] as DateTime);
+
+    final label = [
+      name,
+      reachSentence(peer),
+      if (unread > 0) '$unread unread',
+      if (last != null) 'last message $time: $preview',
+    ].join(', ');
+
+    return Semantics(
+      button: true,
+      label: label,
+      excludeSemantics: true,
+      onTap: onTap,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          child: Row(
+            children: [
+              PeerAvatar(peerId: id, name: name, online: isOnline, size: 52),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.titleMedium,
+                          ),
+                        ),
+                        if (time != null) ...[
+                          const SizedBox(width: 8),
+                          Text(
+                            time,
+                            style: theme.textTheme.bodySmall!.copyWith(
+                              color: unread > 0 ? cs.primary : cs.onSurfaceVariant,
+                              fontWeight: unread > 0 ? FontWeight.w600 : null,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            preview,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodyMedium!.copyWith(
+                              color: unread > 0 ? cs.onSurface : cs.onSurfaceVariant,
+                              fontWeight: unread > 0 ? FontWeight.w600 : null,
+                            ),
+                          ),
+                        ),
+                        if (unread > 0) ...[
+                          const SizedBox(width: 8),
+                          Badge(
+                            label: Text(unread > 99 ? '99+' : '$unread'),
+                            largeSize: 22,
+                            padding: const EdgeInsets.symmetric(horizontal: 7),
+                            textStyle: theme.textTheme.labelMedium,
+                          ),
+                        ],
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
