@@ -264,67 +264,33 @@ class BleService {
         final now = DateTime.now();
 
         for (final r in results) {
-          final deviceId = r.device.remoteId.str;
-
-          String? detectedMultiaddr;
-          bool isChatter = false;
-          int? psm;
-          String? peerIdPrefix;
-
-          // Check if device advertises the Chatter Service UUID
-          if (r.advertisementData.serviceUuids.contains(chatterGuid)) {
-            isChatter = true;
-          }
-
-          final advName = r.advertisementData.advName;
-          final platName = r.device.platformName;
-
-          if (advName.startsWith('Chatter') || platName.startsWith('Chatter')) {
-            isChatter = true;
-          }
-
+          // Only Chatter phones that say who they are (v1 payload:
+          // [0x01][PSM hi][PSM lo][peer ID prefix]); any other BLE device
+          // around could be anything and is left out
           final serviceData = r.advertisementData.serviceData[chatterGuid];
-          if (serviceData != null && serviceData.isNotEmpty) {
-            isChatter = true;
-            // v1 payload: [0x01][PSM hi][PSM lo][peer ID prefix]
-            if (serviceData.length >= 3 && serviceData[0] == 0x01) {
-              final p = (serviceData[1] << 8) | serviceData[2];
-              if (p > 0) psm = p;
-              peerIdPrefix = String.fromCharCodes(serviceData.sublist(3));
-            } else {
-              try {
-                final payloadStr = String.fromCharCodes(serviceData);
-                if (payloadStr.startsWith('/ip4/')) {
-                  detectedMultiaddr = payloadStr;
-                }
-              } catch (_) {}
-            }
-          }
+          if (serviceData == null || serviceData.length < 4 || serviceData[0] != 0x01) continue;
+          final p = (serviceData[1] << 8) | serviceData[2];
+          final peerIdPrefix = String.fromCharCodes(serviceData.sublist(3));
 
-          // A Chatter peer advertises its handle; prefer it over the device name
+          // The handle the peer advertises; fall back to its device name
           final handleData = r.advertisementData.serviceData[_handleGuid];
           final advHandle = handleData != null && handleData.isNotEmpty
               ? utf8.decode(handleData, allowMalformed: true)
               : '';
-
+          final advName = r.advertisementData.advName;
           final displayName = advHandle.isNotEmpty
               ? advHandle
-              : advName.isNotEmpty
-                  ? advName
-                  : (platName.isNotEmpty
-                      ? platName
-                      : (isChatter
-                          ? 'Chatter Peer (${deviceId.substring(0, min(5, deviceId.length))})'
-                          : 'node-${deviceId.replaceAll(':', '').toLowerCase().substring(0, min(6, deviceId.length))}'));
+              : (advName.isNotEmpty ? advName : 'Chatter peer');
 
-          _seenNodes[deviceId] = (
+          // Keyed by peer ID: the BLE address rotates, so one phone would
+          // otherwise show up again under each new address
+          _seenNodes[peerIdPrefix] = (
             NearbyNode(
-              id: deviceId,
+              id: r.device.remoteId.str,
               name: displayName,
               rssi: r.rssi,
-              multiaddr: detectedMultiaddr,
-              isChatterPeer: isChatter,
-              psm: psm,
+              isChatterPeer: true,
+              psm: p > 0 ? p : null,
               peerIdPrefix: peerIdPrefix,
             ),
             now,
@@ -346,16 +312,10 @@ class BleService {
     final cutoff = DateTime.now().subtract(_nearbyTtl);
     _seenNodes.removeWhere((_, entry) => entry.$2.isBefore(cutoff));
     final nodes = _seenNodes.values.map((entry) => entry.$1).toList()
-      // Chatter peers first, then by signal strength (highest RSSI first)
-      ..sort((a, b) {
-        if (a.isChatterPeer && !b.isChatterPeer) return -1;
-        if (!a.isChatterPeer && b.isChatterPeer) return 1;
-        return b.rssi.compareTo(a.rssi);
-      });
+      // Strongest signal (closest) first
+      ..sort((a, b) => b.rssi.compareTo(a.rssi));
     _nearbyNodesController.add(nodes);
   }
-
-  static int min(int a, int b) => a < b ? a : b;
 
   /// Stops scanning
   Future<void> stopScan() async {

@@ -60,7 +60,13 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     }
   }
 
+  // Links coming up or down change what the Nearby list shows
+  void _handlePeerUpdate(Map<String, dynamic> _) {
+    if (mounted) setState(() {});
+  }
+
   void _initBle() async {
+    api.onPeerUpdate(_handlePeerUpdate);
     _bleSubscription = _bleService.nearbyNodes.listen((nodes) {
       if (mounted) {
         setState(() => _nearbyNodes = nodes);
@@ -78,6 +84,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
 
   @override
   void dispose() {
+    api.removeOnPeerUpdate(_handlePeerUpdate);
     _bleSubscription?.cancel();
     _scannerController.dispose();
     super.dispose();
@@ -546,7 +553,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            const Text('NEARBY BLUETOOTH NODES', style: TextStyle(color: Colors.grey, letterSpacing: 2, fontSize: 12)),
+            const Text('NEARBY CHATTER PEERS', style: TextStyle(color: Colors.grey, letterSpacing: 2, fontSize: 12)),
             IconButton(
               icon: const Icon(Icons.refresh, size: 18, color: Color(0xFF935F32)),
               onPressed: () => _bleService.startScan(),
@@ -569,7 +576,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
                   ),
                   const SizedBox(height: 16),
                   Text(
-                    'Scanning for nearby Chatter devices...',
+                    'Looking for nearby phones running Chatter...',
                     style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
                   ),
                 ],
@@ -582,58 +589,45 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     );
   }
 
+  // Identified by peer ID, never by Bluetooth address: the address is a
+  // rotating private one that means nothing to the user
   Widget _buildLiveNodeTile(NearbyNode node) {
+    final prefix = node.peerIdPrefix ?? '';
+    final peerId = api.peerIdForPrefix(prefix);
+    final linked = peerId != null && api.isBluetoothLinked(peerId);
+    final idText = peerId != null && peerId.length > 26
+        ? '${peerId.substring(0, 16)}…${peerId.substring(peerId.length - 8)}'
+        : '$prefix…';
+
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
       decoration: BoxDecoration(
-        color: node.isChatterPeer ? const Color(0xFF1A2E1D) : const Color(0xFF1E1A17),
+        color: const Color(0xFF1A2E1D),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: node.isChatterPeer ? const Color(0xFF16A34A) : const Color(0xFF2A2420),
-          width: node.isChatterPeer ? 1.5 : 1.0,
-        ),
+        border: Border.all(color: const Color(0xFF16A34A), width: 1.5),
       ),
       child: ListTile(
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
         leading: Icon(
-          node.isChatterPeer ? Icons.bluetooth_connected : Icons.bluetooth,
-          color: node.isChatterPeer ? const Color(0xFF4ADE80) : Colors.grey,
+          linked ? Icons.bluetooth_connected : Icons.bluetooth_searching,
+          color: linked ? const Color(0xFF4ADE80) : Colors.grey,
         ),
-        title: Row(
-          children: [
-            Expanded(
-              child: Text(
-                node.name,
-                style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  color: node.isChatterPeer ? Colors.white : Colors.grey.shade300,
-                ),
-              ),
-            ),
-            if (node.isChatterPeer)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF16A34A).withValues(alpha: 0.3),
-                  borderRadius: BorderRadius.circular(4),
-                  border: Border.all(color: const Color(0xFF4ADE80)),
-                ),
-                child: const Text('CHATTER APP', style: TextStyle(color: Color(0xFF4ADE80), fontSize: 10, fontWeight: FontWeight.bold)),
-              ),
-          ],
+        title: Text(
+          node.name,
+          style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
         ),
         subtitle: Text(
-          '${node.id} · ${node.rssi} dBm · ${node.signalStrength}',
+          '$idText · ${node.signalStrength}${linked ? ' · LINKED' : ''}',
           style: const TextStyle(color: Colors.grey, fontSize: 11, fontFamily: 'monospace'),
         ),
         trailing: ElevatedButton(
-          onPressed: () => _handleBlePair(node),
+          onPressed: linked ? () => _openChat(peerId) : () => _handleBlePair(node),
           style: ElevatedButton.styleFrom(
-            backgroundColor: node.isChatterPeer ? const Color(0xFF16A34A) : const Color(0xFF2A2420),
+            backgroundColor: const Color(0xFF16A34A),
             foregroundColor: Colors.white,
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
           ),
-          child: Text(node.isChatterPeer ? 'CONNECT' : 'PAIR'),
+          child: Text(linked ? 'CHAT' : 'CONNECT'),
         ),
       ),
     );
