@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../application_api.dart';
 import '../models/node_info.dart';
 import '../providers/theme_provider.dart';
+import '../services/settings_store.dart';
 
 class NodeSettingsScreen extends ConsumerStatefulWidget {
   const NodeSettingsScreen({super.key});
@@ -14,8 +15,10 @@ class NodeSettingsScreen extends ConsumerStatefulWidget {
 
 class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
   final ApplicationAPI api = ApplicationAPI();
-  bool _bgSync = true;
-  bool _publishToDHT = false;
+  final SettingsStore _settings = SettingsStore();
+  late bool _bgSync = _settings.getBool(SettingsStore.backgroundSync, fallback: true);
+  late bool _publishToDHT = _settings.getBool(SettingsStore.publishToDht, fallback: false);
+  late bool _readReceipts = _settings.getBool(SettingsStore.readReceipts, fallback: true);
   bool _isBackendOnline = false;
   NodeInfo? _nodeInfo;
 
@@ -138,14 +141,30 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
             subtitle: const Text('Keep gossiping while the app is closed', style: TextStyle(color: Colors.grey, fontSize: 12)),
             value: _bgSync,
             activeThumbColor: const Color(0xFF4ADE80),
-            onChanged: (val) => setState(() => _bgSync = val),
+            onChanged: (val) {
+              setState(() => _bgSync = val);
+              _settings.set(SettingsStore.backgroundSync, val);
+            },
           ),
           SwitchListTile(
             title: const Text('Publish to DHT'),
             subtitle: const Text('Let unknown peers discover your PeerID', style: TextStyle(color: Colors.grey, fontSize: 12)),
             value: _publishToDHT,
             activeThumbColor: const Color(0xFF4ADE80),
-            onChanged: (val) => setState(() => _publishToDHT = val),
+            onChanged: (val) {
+              setState(() => _publishToDHT = val);
+              _settings.set(SettingsStore.publishToDht, val);
+            },
+          ),
+          SwitchListTile(
+            title: const Text('Send read receipts'),
+            subtitle: const Text('Let senders see when you have read their messages', style: TextStyle(color: Colors.grey, fontSize: 12)),
+            value: _readReceipts,
+            activeThumbColor: const Color(0xFF4ADE80),
+            onChanged: (val) {
+              setState(() => _readReceipts = val);
+              _settings.set(SettingsStore.readReceipts, val);
+            },
           ),
 
           const Divider(color: Color(0xFF2A2420), height: 32),
@@ -155,10 +174,11 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
             padding: EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
             child: Text('DELIVERY LEGEND', style: TextStyle(color: Colors.grey, letterSpacing: 2, fontSize: 12)),
           ),
-          _buildLegendItem(Icons.access_time, 'Pending', 'Encrypted, queued locally', Colors.grey),
-          _buildLegendItem(Icons.check, 'Delivered', 'Acknowledged by destination transport', Colors.grey),
-          _buildLegendItem(Icons.done_all, 'Verified', 'Decrypted, signature validated', const Color(0xFF4ADE80)),
-          _buildLegendItem(Icons.warning_amber_rounded, 'Orphaned', 'Message did not arrive', Colors.redAccent),
+          _buildLegendItem(Icons.schedule, 'Sending', 'Leaving this phone', Colors.grey),
+          _buildLegendItem(Icons.check, 'Sent', 'Handed to the mesh (directly or via relays)', Colors.grey),
+          _buildLegendItem(Icons.done_all, 'Delivered', 'Their phone confirmed it arrived', Colors.grey),
+          _buildLegendItem(Icons.done_all, 'Read', 'They opened the chat', const Color(0xFF4ADE80)),
+          _buildLegendItem(Icons.error_outline, 'Not delivered', 'No Wi-Fi, Bluetooth or relay path at the time', Colors.redAccent),
         ],
       ),
     );

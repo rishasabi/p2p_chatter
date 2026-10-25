@@ -6,9 +6,12 @@ import 'screens/initialization_screen.dart';
 import 'screens/mesh_screen.dart';
 import 'screens/node_settings_screen.dart';
 import 'services/embedded_node_service.dart';
+import 'services/settings_store.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Saved settings (theme etc.) must be in place before the first frame
+  await SettingsStore().load();
   // Ensure the embedded background Go service runs with the app as a single unit
   await EmbeddedNodeService().ensureStarted();
   runApp(const ProviderScope(child: P2PChatApp()));
@@ -98,7 +101,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       bottomNavigationBar: NavigationBar(
         selectedIndex: _currentIndex,
         onDestinationSelected: (index) => setState(() => _currentIndex = index),
-        backgroundColor: const Color(0xFF14110F),
+        // Fixed dark bar only in dark mode; in light mode its labels would vanish
+        backgroundColor: Theme.of(context).brightness == Brightness.dark ? const Color(0xFF14110F) : null,
         indicatorColor: const Color(0xFF935F32).withValues(alpha: 0.3),
         destinations: const [
           NavigationDestination(
