@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -13,6 +14,7 @@ import 'package:app/models/peer.dart';
 import 'package:app/providers/providers.dart';
 import 'package:app/services/api_service.dart';
 import 'package:app/services/embedded_node_service.dart';
+import 'package:app/services/local_store.dart';
 
 ChatterApiService mockApiService({
   String? healthBody,
@@ -67,6 +69,9 @@ ChatterApiService mockApiService({
 }
 
 void main() {
+  // No real file I/O from tests (it would also hang widget tests)
+  LocalStore.isTestMode = true;
+
   group('Models', () {
     test('NodeInfo parses JSON correctly', () {
       final info = NodeInfo.fromJson({
@@ -81,6 +86,8 @@ void main() {
     test('Peer parses JSON correctly', () {
       final peer = Peer.fromJson({'id': '12D3KooWXYZ'});
       expect(peer.id, '12D3KooWXYZ');
+      expect(peer.handle, isNull);
+      expect(Peer.fromJson({'id': '12D3KooWXYZ', 'handle': 'dave'}).handle, 'dave');
     });
 
     test('ChatMessage parses JSON correctly', () {
@@ -92,6 +99,33 @@ void main() {
       });
       expect(msg.content, 'hello mesh');
       expect(msg.isOutgoing, isFalse);
+      expect(msg.isRelayed, isFalse);
+
+      final relayed = ChatMessage.fromJson({
+        'id': 2,
+        'from': '12D3KooWPeer',
+        'content': 'via a friend',
+        'timestamp': '2026-10-13T12:00:00Z',
+        'msg_id': 'abc',
+        'handle': 'erin',
+        'via': '12D3KooWRelay',
+      });
+      expect(relayed.msgId, 'abc');
+      expect(relayed.handle, 'erin');
+      expect(relayed.isRelayed, isTrue);
+    });
+
+    test('Receipt parses JSON correctly', () {
+      final r = Receipt.fromJson({
+        'id': 3,
+        'from': '12D3KooWPeer',
+        'ids': ['a', 'b'],
+        'status': 'read',
+        'timestamp': '2026-10-13T12:00:00Z',
+      });
+      expect(r.ids, ['a', 'b']);
+      expect(r.status, 'read');
+      expect(r.isRelayed, isFalse);
     });
   });
 
@@ -135,6 +169,126 @@ void main() {
     });
   });
 
+  group('ApplicationAPI', () {
+    TestWidgetsFlutterBinding.ensureInitialized();
+
+    // Simulates MainActivity invoking a callback on the Bluetooth method channel
+    Future<void> nativeCall(String method, Map<String, dynamic> args) =>
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .handlePlatformMessage(
+          'com.example.app/ble_advertiser',
+          const StandardMethodCodec().encodeMethodCall(MethodCall(method, args)),
+          (_) {},
+        );
+
+    // A message as the node hands it over from GET /messages
+    ChatMessage fromNode(String from, String msgId, String content, {String? via, String? handle}) =>
+        ChatMessage(
+          id: 0,
+          from: from,
+          content: content,
+          timestamp: DateTime.utc(2026, 1, 2, 3, 4, 5),
+          msgId: msgId,
+          via: via,
+          handle: handle,
+        );
+
+    test('message received with no chat open is kept in history, once', () {
+      final api = ApplicationAPI()..stopPolling();
+      api.receiveFromNode(fromNode('12D3KooWBtPeer', 'm-1', 'over the air', handle: 'dave'));
+      api.receiveFromNode(fromNode('12D3KooWBtPeer', 'm-1', 'over the air')); // refetched
+
+      final history = api.historyFor('12D3KooWBtPeer');
+      expect(history, hasLength(1));
+      expect(history.single['content'], 'over the air');
+      expect(history.single['isOutgoing'], isFalse);
+      expect(history.single['status'], 'received');
+      expect(api.displayName('12D3KooWBtPeer'), 'dave'); // the sender's signed handle
+      expect(api.unreadCount('12D3KooWBtPeer'), 1);
+    });
+
+    test('viewing a chat clears unread even if the read receipt has to wait', () async {
+      final api = ApplicationAPI()..stopPolling();
+      api.receiveFromNode(fromNode('12D3KooWReader', 'r-1', 'one'));
+      api.receiveFromNode(fromNode('12D3KooWReader', 'r-2', 'two'));
+      expect(api.unreadCount('12D3KooWReader'), 2);
+
+      await api.markRead('12D3KooWReader'); // no node in tests, so the receipt can't go out
+      expect(api.unreadCount('12D3KooWReader'), 0);
+      expect(api.historyFor('12D3KooWReader').any((m) => m['readSent'] == true), isFalse,
+          reason: 'unsent read receipts are retried later');
+    });
+
+    test('a relayed message shows the peer as reachable via mesh', () {
+      final api = ApplicationAPI()..stopPolling();
+      api.receiveFromNode(fromNode('12D3KooWFarPeer', 'f-1', 'hi from afar', via: '12D3KooWRelay'));
+      final status = api.peerStatus('12D3KooWFarPeer');
+      expect(status['type'], 'VIA MESH');
+      expect(status['online'], isTrue);
+    });
+
+    test('receipts move a sent message forward, never back, and only from its recipient', () async {
+      final api = ApplicationAPI()..stopPolling();
+      const peer = '12D3KooWReceiptPeer';
+      // No node in tests, so the send itself fails
+      await expectLater(api.sendMessage('anyone there?', peer), throwsA(isA<ApiException>()));
+      final msg = api.historyFor(peer).last;
+      final id = msg['id'] as String;
+      expect(msg['content'], 'anyone there?');
+      expect(msg['status'], 'failed');
+
+      api.receiveReceiptFromNode(Receipt(id: 1, from: '12D3KooWSomeoneElse', ids: [id], status: 'read'));
+      expect(msg['status'], 'failed');
+
+      // A receipt from the recipient proves it arrived after all
+      api.receiveReceiptFromNode(Receipt(id: 2, from: peer, ids: [id], status: 'delivered'));
+      expect(msg['status'], 'delivered');
+      api.receiveReceiptFromNode(Receipt(id: 3, from: peer, ids: [id], status: 'read'));
+      expect(msg['status'], 'read');
+      api.receiveReceiptFromNode(Receipt(id: 4, from: peer, ids: [id], status: 'delivered'));
+      expect(msg['status'], 'read');
+    });
+
+    test('handles are validated', () {
+      expect(ApplicationAPI.validateHandle('alice_01'), isNull);
+      expect(ApplicationAPI.validateHandle('  bob.k  '), isNull);
+      expect(ApplicationAPI.validateHandle('ab'), isNotNull);
+      expect(ApplicationAPI.validateHandle('a' * 21), isNotNull);
+      expect(ApplicationAPI.validateHandle('has space'), isNotNull);
+    });
+
+    test('peer status follows the Bluetooth link and keeps known peers', () async {
+      final api = ApplicationAPI()..stopPolling();
+      final updates = <Map<String, dynamic>>[];
+      void listener(Map<String, dynamic> u) {
+        if (u['id'] == '12D3KooWStatusPeer') updates.add(u);
+      }
+      api.onPeerUpdate(listener);
+
+      await nativeCall('onBluetoothPeerConnected', {
+        'peerId': '12D3KooWStatusPeer',
+        'name': 'carol',
+        'address': '11:22:33:44:55:66',
+        'addrs': ['/ip4/192.168.1.9/tcp/4001/p2p/12D3KooWStatusPeer'],
+      });
+      var status = api.peerStatus('12D3KooWStatusPeer');
+      expect(status['name'], 'carol'); // handle from the handshake
+      expect(status['type'], 'BLUETOOTH');
+      expect(status['online'], isTrue);
+
+      await nativeCall('onBluetoothPeerDisconnected', {'peerId': '12D3KooWStatusPeer'});
+      status = api.peerStatus('12D3KooWStatusPeer');
+      expect(status['type'], 'OFFLINE');
+      // Still a known contact, so it stays in the list and can be reconnected
+      expect(api.peers.map((p) => p['id']), contains('12D3KooWStatusPeer'));
+
+      // One notification per actual change
+      expect(updates.map((u) => u['type']), ['BLUETOOTH', 'OFFLINE']);
+      api.removeOnPeerUpdate(listener);
+    });
+
+  });
+
   group('Widget tests', () {
     setUp(() {
       EmbeddedNodeService.isTestMode = true;
@@ -158,7 +312,7 @@ void main() {
       expect(find.byType(MaterialApp), findsOneWidget);
     });
 
-    testWidgets('MainNavigationScreen displays Chats, Discover, and Config tabs', (tester) async {
+    testWidgets('MainNavigationScreen displays Chats, Discover, and Settings tabs', (tester) async {
       final svc = mockApiService();
       await tester.pumpWidget(
         ProviderScope(
@@ -172,10 +326,10 @@ void main() {
 
       expect(find.text('Chats'), findsOneWidget);
       expect(find.text('Discover'), findsOneWidget);
-      expect(find.text('Config'), findsOneWidget);
+      expect(find.text('Settings'), findsOneWidget);
     });
 
-    testWidgets('Tapping Config tab navigates to Node Configuration', (tester) async {
+    testWidgets('Tapping Settings tab opens the settings screen', (tester) async {
       final svc = mockApiService();
       await tester.pumpWidget(
         ProviderScope(
@@ -186,11 +340,13 @@ void main() {
         ),
       );
       await tester.pump(const Duration(milliseconds: 100));
-      await tester.tap(find.text('Config'));
+      await tester.tap(find.text('Settings'));
       await tester.pumpAndSettle(const Duration(seconds: 1));
 
-      expect(find.text('Node Configuration'), findsOneWidget);
-      expect(find.text('Dark Theme'), findsOneWidget);
+      // The nav label and the screen title
+      expect(find.text('Settings'), findsNWidgets(2));
+      expect(find.text('Theme'), findsOneWidget);
+      expect(find.text('Dark'), findsOneWidget);
     });
   });
 }

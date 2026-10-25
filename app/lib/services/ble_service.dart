@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -12,12 +13,21 @@ class NearbyNode {
   final String? multiaddr;
   final bool isChatterPeer;
 
+  /// LE L2CAP PSM advertised by a Chatter peer. [id] is a private BLE address
+  /// that RFCOMM can't reach, so connections to Chatter peers go through this.
+  final int? psm;
+
+  /// Leading characters of the peer's libp2p ID, from its advertisement.
+  final String? peerIdPrefix;
+
   const NearbyNode({
     required this.id,
     required this.name,
     required this.rssi,
     this.multiaddr,
     this.isChatterPeer = false,
+    this.psm,
+    this.peerIdPrefix,
   });
 
   bool get isP2pCapable => isChatterPeer || (multiaddr != null && multiaddr!.isNotEmpty);
@@ -39,8 +49,17 @@ class BleService {
   static const MethodChannel _advertiserChannel =
       MethodChannel('com.example.app/ble_advertiser');
 
+  static final Guid _chatterGuid = Guid('0000ff01-0000-1000-8000-00805f9b34fb');
+  // Scan-response service data carrying the advertiser's handle
+  static final Guid _handleGuid = Guid('0000ff02-0000-1000-8000-00805f9b34fb');
+  static const Duration _nearbyTtl = Duration(seconds: 30);
+
   bool _isAdvertising = false;
   bool _isScanning = false;
+  StreamSubscription<List<ScanResult>>? _scanSubscription;
+  // Devices from recent scans and when each was last seen, so the list doesn't
+  // empty out every time a new scan starts
+  final Map<String, (NearbyNode, DateTime)> _seenNodes = {};
   final StreamController<List<NearbyNode>> _nearbyNodesController =
       StreamController<List<NearbyNode>>.broadcast();
 
@@ -108,6 +127,17 @@ class BleService {
     }
   }
 
+  /// Posts a system notification for a message from [peerId]. Here because
+  /// this is the app's one native channel.
+  Future<void> showMessageNotification({required String peerId, required String title, required String body}) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _advertiserChannel.invokeMethod('showMessageNotification', {'peerId': peerId, 'title': title, 'body': body});
+    } catch (e) {
+      debugPrint('Could not show notification: $e');
+    }
+  }
+
   /// Query local device Bluetooth name and MAC
   Future<Map<String, String>> getDeviceBluetoothInfo() async {
     if (!Platform.isAndroid) return {};
@@ -118,6 +148,22 @@ class BleService {
       }
     } catch (_) {}
     return {};
+  }
+
+  /// Sets the libp2p peer ID, handle and Wi-Fi multiaddrs this device presents
+  /// in Bluetooth handshakes. Must be called before connecting, even when not
+  /// advertising.
+  Future<void> setLocalIdentity(String peerId, {String? name, List<String>? addrs}) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _advertiserChannel.invokeMethod('setLocalIdentity', {
+        'peerId': peerId,
+        'name': name ?? '',
+        'addrs': addrs ?? const <String>[],
+      });
+    } catch (e) {
+      debugPrint('BLE setLocalIdentity error: $e');
+    }
   }
 
   /// Starts broadcasting this device as a Chatter BLE node
@@ -155,8 +201,9 @@ class BleService {
     } catch (_) {}
   }
 
-  /// Connect to a remote device directly over Bluetooth RFCOMM
-  Future<bool> connectBluetooth(String address, {String? peerId}) async {
+  /// Connect to a remote device directly over Bluetooth: LE L2CAP when the
+  /// peer advertised a [psm], otherwise RFCOMM (needs its classic MAC)
+  Future<bool> connectBluetooth(String address, {String? peerId, int? psm}) async {
     if (!Platform.isAndroid) return false;
     try {
       await requestPermissions();
@@ -165,6 +212,7 @@ class BleService {
         {
           'address': address,
           'peerId': peerId ?? '',
+          'psm': psm ?? 0,
         },
       );
       return res ?? false;
@@ -219,69 +267,48 @@ class BleService {
       }
 
       _isScanning = true;
-      final chatterGuid = Guid('0000ff01-0000-1000-8000-00805f9b34fb');
+      final chatterGuid = _chatterGuid;
 
-      // Listen to scan results
-      FlutterBluePlus.scanResults.listen((results) {
-        final List<NearbyNode> nodes = [];
-        final Set<String> seenIds = {};
+      // Listen to scan results (replace any listener from a previous scan)
+      await _scanSubscription?.cancel();
+      _scanSubscription = FlutterBluePlus.scanResults.listen((results) {
+        final now = DateTime.now();
 
         for (final r in results) {
-          final deviceId = r.device.remoteId.str;
-          if (seenIds.contains(deviceId)) continue;
-          seenIds.add(deviceId);
-
-          String? detectedMultiaddr;
-          bool isChatter = false;
-
-          // Check if device advertises the Chatter Service UUID
-          if (r.advertisementData.serviceUuids.contains(chatterGuid)) {
-            isChatter = true;
-          }
-
-          final advName = r.advertisementData.advName;
-          final platName = r.device.platformName;
-
-          if (advName.startsWith('Chatter') || platName.startsWith('Chatter')) {
-            isChatter = true;
-          }
-
+          // Only Chatter phones that say who they are (v1 payload:
+          // [0x01][PSM hi][PSM lo][peer ID prefix]); any other BLE device
+          // around could be anything and is left out
           final serviceData = r.advertisementData.serviceData[chatterGuid];
-          if (serviceData != null && serviceData.isNotEmpty) {
-            isChatter = true;
-            try {
-              final payloadStr = String.fromCharCodes(serviceData);
-              if (payloadStr.startsWith('/ip4/')) {
-                detectedMultiaddr = payloadStr;
-              }
-            } catch (_) {}
-          }
+          if (serviceData == null || serviceData.length < 4 || serviceData[0] != 0x01) continue;
+          final p = (serviceData[1] << 8) | serviceData[2];
+          final peerIdPrefix = String.fromCharCodes(serviceData.sublist(3));
 
-          final displayName = advName.isNotEmpty
-              ? advName
-              : (platName.isNotEmpty
-                  ? platName
-                  : (isChatter
-                      ? 'Chatter Peer (${deviceId.substring(0, min(5, deviceId.length))})'
-                      : 'node-${deviceId.replaceAll(':', '').toLowerCase().substring(0, min(6, deviceId.length))}'));
+          // The handle the peer advertises; fall back to its device name
+          final handleData = r.advertisementData.serviceData[_handleGuid];
+          final advHandle = handleData != null && handleData.isNotEmpty
+              ? utf8.decode(handleData, allowMalformed: true)
+              : '';
+          final advName = r.advertisementData.advName;
+          final displayName = advHandle.isNotEmpty
+              ? advHandle
+              : (advName.isNotEmpty ? advName : 'Chatter peer');
 
-          nodes.add(NearbyNode(
-            id: deviceId,
-            name: displayName,
-            rssi: r.rssi,
-            multiaddr: detectedMultiaddr,
-            isChatterPeer: isChatter,
-          ));
+          // Keyed by peer ID: the BLE address rotates, so one phone would
+          // otherwise show up again under each new address
+          _seenNodes[peerIdPrefix] = (
+            NearbyNode(
+              id: r.device.remoteId.str,
+              name: displayName,
+              rssi: r.rssi,
+              isChatterPeer: true,
+              psm: p > 0 ? p : null,
+              peerIdPrefix: peerIdPrefix,
+            ),
+            now,
+          );
         }
 
-        // Sort: Chatter peers first, then by signal strength (highest RSSI first)
-        nodes.sort((a, b) {
-          if (a.isChatterPeer && !b.isChatterPeer) return -1;
-          if (!a.isChatterPeer && b.isChatterPeer) return 1;
-          return b.rssi.compareTo(a.rssi);
-        });
-
-        _nearbyNodesController.add(nodes);
+        _emitNearby();
       });
 
       await FlutterBluePlus.startScan(timeout: timeout);
@@ -292,7 +319,14 @@ class BleService {
     }
   }
 
-  static int min(int a, int b) => a < b ? a : b;
+  void _emitNearby() {
+    final cutoff = DateTime.now().subtract(_nearbyTtl);
+    _seenNodes.removeWhere((_, entry) => entry.$2.isBefore(cutoff));
+    final nodes = _seenNodes.values.map((entry) => entry.$1).toList()
+      // Strongest signal (closest) first
+      ..sort((a, b) => b.rssi.compareTo(a.rssi));
+    _nearbyNodesController.add(nodes);
+  }
 
   /// Stops scanning
   Future<void> stopScan() async {
@@ -303,6 +337,7 @@ class BleService {
   }
 
   void dispose() {
+    _scanSubscription?.cancel();
     stopScan();
     stopAdvertising();
     _nearbyNodesController.close();

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -8,6 +9,10 @@ import 'package:permission_handler/permission_handler.dart';
 import '../application_api.dart';
 import '../models/node_info.dart';
 import '../services/ble_service.dart';
+import '../theme/app_theme.dart';
+import '../widgets/feedback.dart';
+import '../widgets/peer_display.dart';
+import 'chat_screen.dart';
 
 class DiscoverScreen extends StatefulWidget {
   final String myBootstrapData;
@@ -17,12 +22,13 @@ class DiscoverScreen extends StatefulWidget {
   State<DiscoverScreen> createState() => _DiscoverScreenState();
 }
 
-class _DiscoverScreenState extends State<DiscoverScreen> {
+class _DiscoverScreenState extends State<DiscoverScreen> with WidgetsBindingObserver {
   final ApplicationAPI api = ApplicationAPI();
   final BleService _bleService = BleService();
 
   late final MobileScannerController _scannerController;
   bool _hasCameraPermission = false;
+  bool _cameraPermanentlyDenied = false;
   bool _isCheckingPermission = true;
   bool _torchEnabled = false;
 
@@ -31,6 +37,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
   bool _isLoadingNode = true;
   bool _isConnecting = false;
   bool _isBleAdvertising = false;
+  bool _isTogglingBle = false;
   List<NearbyNode> _nearbyNodes = [];
   StreamSubscription<List<NearbyNode>>? _bleSubscription;
 
@@ -43,57 +50,92 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
       facing: CameraFacing.back,
       torchEnabled: false,
     );
+    WidgetsBinding.instance.addObserver(this);
     _checkCameraPermission();
     _fetchLiveNodeData();
     _initBle();
   }
 
   Future<void> _checkCameraPermission() async {
+    // Once permanently denied, only the system settings can grant it; the
+    // result is picked up when the user comes back (didChangeAppLifecycleState)
+    if (_cameraPermanentlyDenied) {
+      await openAppSettings();
+      return;
+    }
     setState(() => _isCheckingPermission = true);
-    final status = await Permission.camera.request();
+    PermissionStatus status;
+    try {
+      status = await Permission.camera.request();
+    } catch (e) {
+      // No permission service (e.g. desktop): show the ask-again state, not an endless spinner
+      debugPrint('Camera permission request failed: $e');
+      status = PermissionStatus.denied;
+    }
     if (mounted) {
       setState(() {
         _hasCameraPermission = status.isGranted;
+        _cameraPermanentlyDenied = status.isPermanentlyDenied;
         _isCheckingPermission = false;
       });
     }
   }
 
+  // Links coming up or down change what the Nearby list shows
+  void _handlePeerUpdate(Map<String, dynamic> _) {
+    if (mounted) setState(() {});
+  }
+
   void _initBle() async {
+    api.onPeerUpdate(_handlePeerUpdate);
     _bleSubscription = _bleService.nearbyNodes.listen((nodes) {
       if (mounted) {
         setState(() => _nearbyNodes = nodes);
       }
     });
 
-    // Check persistent broadcast preference and auto-start if previously enabled
-    final broadcastPersisted = await _bleService.getBroadcastEnabled();
+    // ApplicationAPI starts the broadcast at launch; just reflect its state
+    final broadcastEnabled = await _bleService.getBroadcastEnabled();
     if (mounted) {
-      setState(() => _isBleAdvertising = broadcastPersisted);
-    }
-    if (broadcastPersisted) {
-      _startAdvertisingInternal();
+      setState(() => _isBleAdvertising = broadcastEnabled);
     }
 
     _bleService.startScan();
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed || !_cameraPermanentlyDenied) return;
+    Permission.camera.status.then((status) {
+      if (mounted && status.isGranted) {
+        setState(() {
+          _hasCameraPermission = true;
+          _cameraPermanentlyDenied = false;
+        });
+      }
+    });
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    api.removeOnPeerUpdate(_handlePeerUpdate);
     _bleSubscription?.cancel();
     _scannerController.dispose();
     super.dispose();
   }
 
   Future<void> _fetchLiveNodeData() async {
+    if (!_isLoadingNode) setState(() => _isLoadingNode = true);
     try {
       final info = await api.getNode();
       final btInfo = await _bleService.getDeviceBluetoothInfo();
 
-      // Unified offline QR connection payload (JSON)
+      // Unified offline QR connection payload (JSON). 'name' is our handle,
+      // so whoever scans it knows who they're talking to straight away.
       final payload = {
         'id': info.id,
-        'name': btInfo['name']?.isNotEmpty == true ? btInfo['name'] : 'Chatter Peer',
+        'name': api.myHandle ?? (btInfo['name']?.isNotEmpty == true ? btInfo['name'] : 'Chatter Peer'),
         if (btInfo['address']?.isNotEmpty == true && btInfo['address'] != '02:00:00:00:00:00')
           'bt': btInfo['address'],
         if (info.hasRoutableAddrs) 'addrs': info.routableAddrs,
@@ -113,119 +155,79 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     }
   }
 
-  Future<void> _startAdvertisingInternal() async {
-    final peerId = _nodeInfo?.id ?? 'chatter-node';
-    final btInfo = await _bleService.getDeviceBluetoothInfo();
-    final name = btInfo['name']?.isNotEmpty == true
-        ? btInfo['name']
-        : (peerId.length > 8 ? 'Chatter-${peerId.substring(0, 6)}' : 'Chatter');
-
-    await _bleService.startAdvertising(
-      peerId,
-      address: _currentBootstrapData,
-      name: name,
-    );
-  }
-
   Future<void> _toggleBleAdvertising() async {
-    if (_isBleAdvertising) {
-      await _bleService.stopAdvertising();
-      if (mounted) {
-        setState(() => _isBleAdvertising = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            backgroundColor: Color(0xFF1E1A17),
-            content: Text('BLE Broadcast stopped'),
-            duration: Duration(seconds: 2),
-          ),
-        );
-      }
-    } else {
-      final peerId = _nodeInfo?.id ?? 'chatter-node';
-      final btInfo = await _bleService.getDeviceBluetoothInfo();
-      final name = btInfo['name']?.isNotEmpty == true
-          ? btInfo['name']
-          : (peerId.length > 8 ? 'Chatter-${peerId.substring(0, 6)}' : 'Chatter');
+    setState(() => _isTogglingBle = true);
+    try {
+      if (_isBleAdvertising) {
+        await api.setBroadcastEnabled(false);
+        if (mounted) {
+          setState(() => _isBleAdvertising = false);
+          showNotice(context, 'You\'re hidden from nearby phones', duration: const Duration(seconds: 2));
+        }
+      } else {
+        final started = await api.setBroadcastEnabled(true);
 
-      final started = await _bleService.startAdvertising(
-        peerId,
-        address: _currentBootstrapData,
-        name: name,
-      );
-
-      if (mounted) {
-        setState(() => _isBleAdvertising = started);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            backgroundColor: started ? const Color(0xFF16A34A) : Colors.red.shade900,
-            content: Text(started
-                ? 'Broadcasting node over Bluetooth (persisted in storage)'
-                : 'Failed to start BLE advertising (check Bluetooth settings)'),
-            duration: const Duration(seconds: 2),
-          ),
-        );
+        if (mounted) {
+          setState(() => _isBleAdvertising = started);
+          if (started) {
+            showNotice(context, 'Nearby phones running Chatter can now find you',
+                tone: NoticeTone.success, duration: const Duration(seconds: 2));
+          } else {
+            showNotice(context, 'Could not start Bluetooth visibility. Check that Bluetooth is on.',
+                tone: NoticeTone.error);
+          }
+        }
       }
+    } finally {
+      if (mounted) setState(() => _isTogglingBle = false);
     }
   }
 
-  Future<void> _connectToPeer(String address) async {
-    final cleanAddr = address.trim();
-    if (cleanAddr.isEmpty) return;
-
-    setState(() => _isConnecting = true);
-
+  /// Opens the conversation with [peerId] on top of the Discover screen.
+  Future<void> _openChat(String peerId) async {
+    if (!mounted) return;
     ScaffoldMessenger.of(context).hideCurrentSnackBar();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        backgroundColor: const Color(0xFF1E1A17),
-        content: Text('Connecting to peer:\n$cleanAddr', style: const TextStyle(fontSize: 12)),
-        duration: const Duration(seconds: 2),
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ChatScreen(peerName: api.displayName(peerId), peerId: peerId),
       ),
     );
+  }
+
+  /// The handle inside a scanned Chatter code, for messages only.
+  static String? _nameInCode(String code) {
+    try {
+      final decoded = jsonDecode(code);
+      if (decoded is Map && decoded['name'] is String) return decoded['name'] as String;
+    } catch (_) {}
+    return null;
+  }
+
+  /// Connects to the peer in a scanned code. Returns its peer ID when the
+  /// connection succeeded and the code names the peer, otherwise null.
+  Future<String?> _connectToPeer(String address) async {
+    final cleanAddr = address.trim();
+    if (cleanAddr.isEmpty) return null;
+
+    setState(() => _isConnecting = true);
+    final name = _nameInCode(cleanAddr);
+
+    showNotice(context, name != null ? 'Connecting to $name…' : 'Connecting…',
+        duration: const Duration(seconds: 2));
 
     try {
-      if (cleanAddr.startsWith('{')) {
-        try {
-          final data = jsonDecode(cleanAddr) as Map<String, dynamic>;
-          final btMac = data['bt'] as String? ?? '';
-          final peerId = data['id'] as String? ?? '';
-          final addrs = data['addrs'] as List? ?? [];
+      // ApplicationAPI handles JSON QR payloads (Bluetooth first, then all TCP addrs)
+      final peerId = await api.connectPeer(cleanAddr);
 
-          if (btMac.isNotEmpty && btMac != '02:00:00:00:00:00') {
-            await _bleService.connectBluetooth(btMac, peerId: peerId);
-          } else if (addrs.isNotEmpty) {
-            await api.connectPeer(addrs.first.toString());
-          } else if (peerId.isNotEmpty) {
-            await api.connectPeer(peerId);
-          }
-        } catch (_) {
-          await api.connectPeer(cleanAddr);
-        }
-      } else {
-        await api.connectPeer(cleanAddr);
+      if (mounted && peerId == null) {
+        showNotice(context, name != null ? 'Connected to $name' : 'Connected', tone: NoticeTone.success);
       }
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).hideCurrentSnackBar();
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            backgroundColor: Color(0xFF16A34A),
-            content: Text('Successfully connected to peer!'),
-            duration: Duration(seconds: 3),
-          ),
-        );
-      }
+      return peerId;
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).hideCurrentSnackBar();
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            backgroundColor: Colors.red.shade900,
-            content: Text('Connection note: $e'),
-            duration: const Duration(seconds: 4),
-          ),
-        );
+        showNotice(context, 'Could not connect. $e', tone: NoticeTone.error, duration: const Duration(seconds: 4));
       }
+      return null;
     } finally {
       if (mounted) {
         setState(() => _isConnecting = false);
@@ -236,43 +238,28 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
   Future<void> _handleBlePair(NearbyNode node) async {
     setState(() => _isConnecting = true);
 
-    ScaffoldMessenger.of(context).hideCurrentSnackBar();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        backgroundColor: const Color(0xFF1E1A17),
-        content: Text('Connecting to ${node.name} via Bluetooth RFCOMM...'),
-        duration: const Duration(seconds: 3),
-      ),
-    );
+    showNotice(context, 'Connecting to ${node.name} over Bluetooth…');
 
+    String? peerId;
     try {
-      await _bleService.connectBluetooth(node.id, peerId: node.name);
-      if (mounted) {
-        ScaffoldMessenger.of(context).hideCurrentSnackBar();
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            backgroundColor: const Color(0xFF16A34A),
-            content: Text('Connected to ${node.name} via Bluetooth!'),
-            duration: const Duration(seconds: 3),
-          ),
-        );
+      await api.connectBluetooth(node.id, peerId: node.peerIdPrefix, psm: node.psm);
+      // The handshake tells us exactly who answered
+      final prefix = node.peerIdPrefix;
+      peerId = prefix != null ? await api.waitForBluetoothPeer(prefix) : null;
+      if (mounted && peerId == null) {
+        showNotice(context, 'Connected to ${node.name} over Bluetooth', tone: NoticeTone.success);
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).hideCurrentSnackBar();
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            backgroundColor: Colors.red.shade900,
-            content: Text('Bluetooth connection note: $e'),
-            duration: const Duration(seconds: 4),
-          ),
-        );
+        showNotice(context, 'Could not connect to ${node.name} over Bluetooth. $e',
+            tone: NoticeTone.error, duration: const Duration(seconds: 4));
       }
     } finally {
       if (mounted) {
         setState(() => _isConnecting = false);
       }
     }
+    if (peerId != null) await _openChat(peerId);
   }
 
   @override
@@ -283,12 +270,9 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
         appBar: AppBar(
           title: const Text('Discover'),
           bottom: const TabBar(
-            indicatorColor: Color(0xFF935F32),
-            labelColor: Color(0xFF935F32),
-            unselectedLabelColor: Colors.grey,
             tabs: [
-              Tab(icon: Icon(Icons.qr_code), text: 'My Code'),
-              Tab(icon: Icon(Icons.camera_alt), text: 'Scan'),
+              Tab(icon: Icon(Icons.qr_code), text: 'My code'),
+              Tab(icon: Icon(Icons.qr_code_scanner), text: 'Scan'),
               Tab(icon: Icon(Icons.bluetooth_searching), text: 'Nearby'),
             ],
           ),
@@ -296,83 +280,8 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
         body: TabBarView(
           children: [
             // Tab 1: Show Own QR Code (Always available offline, with Bluetooth identity)
-            Center(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.all(24.0),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    if (_isLoadingNode)
-                      const Column(
-                        children: [
-                          CircularProgressIndicator(color: Color(0xFF935F32)),
-                          SizedBox(height: 16),
-                          Text('Preparing node identity...',
-                              style: TextStyle(color: Colors.grey, fontSize: 13)),
-                        ],
-                      )
-                    else ...[
-                      Container(
-                        padding: const EdgeInsets.all(16),
-                        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
-                        child: QrImageView(
-                          data: _currentBootstrapData.isNotEmpty
-                              ? _currentBootstrapData
-                              : (_nodeInfo?.id ?? 'chatter-node'),
-                          version: QrVersions.auto,
-                          size: 220.0,
-                          backgroundColor: Colors.white,
-                        ),
-                      ),
-                      const SizedBox(height: 24),
-                      const Text(
-                        'Have your peer scan this QR code to connect directly via Bluetooth or local network.',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(color: Colors.grey, height: 1.4),
-                      ),
-                      const SizedBox(height: 16),
-                      GestureDetector(
-                        onTap: () {
-                          Clipboard.setData(ClipboardData(text: _currentBootstrapData));
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              backgroundColor: Color(0xFF935F32),
-                              content: Text('Address copied to clipboard!'),
-                              duration: Duration(seconds: 2),
-                            ),
-                          );
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF1E1A17),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: const Color(0xFF2A2420)),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(Icons.copy, size: 14, color: Color(0xFF935F32)),
-                              const SizedBox(width: 8),
-                              Flexible(
-                                child: Text(
-                                  _currentBootstrapData.length > 35
-                                      ? '${_currentBootstrapData.substring(0, 32)}…'
-                                      : _currentBootstrapData,
-                                  style: const TextStyle(fontSize: 11, color: Colors.grey, fontFamily: 'monospace'),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-            
+            _buildMyCodeTab(),
+
             // Tab 2: Scan Peer's QR Code
             _buildScannerTab(),
 
@@ -384,220 +293,293 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     );
   }
 
-  Widget _buildScannerTab() {
-    if (_isCheckingPermission) {
-      return const Center(
-        child: CircularProgressIndicator(color: Color(0xFF935F32)),
+  Widget _buildMyCodeTab() {
+    if (_isLoadingNode) {
+      return const StateMessage(
+        leading: CircularProgressIndicator(),
+        title: 'Preparing your code',
+      );
+    }
+    if (_currentBootstrapData.isEmpty) {
+      return StateMessage(
+        icon: Icons.qr_code,
+        title: 'Your code isn\'t ready',
+        body: 'The local node didn\'t answer, so there is no code to share yet.',
+        action: FilledButton(onPressed: _fetchLiveNodeData, child: const Text('Try again')),
       );
     }
 
-    if (!_hasCameraPermission) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32.0),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.camera_alt_outlined, size: 56, color: Color(0xFF935F32)),
-              const SizedBox(height: 16),
-              const Text(
-                'Camera Access Required',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                'To scan peer QR codes, please grant camera permissions.',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.grey, fontSize: 13),
-              ),
-              const SizedBox(height: 24),
-              ElevatedButton(
-                onPressed: _checkCameraPermission,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF935F32),
-                  foregroundColor: Colors.white,
-                ),
-                child: const Text('ALLOW CAMERA'),
-              ),
-            ],
-          ),
-        ),
-      );
-    }
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final handle = api.myHandle;
 
-    return Stack(
-      children: [
-        MobileScanner(
-          controller: _scannerController,
-          onDetect: (capture) async {
-            if (_isConnecting) return;
-            for (final barcode in capture.barcodes) {
-              final rawValue = barcode.rawValue?.trim();
-              if (rawValue != null && rawValue.isNotEmpty) {
-                // Immediately set flag synchronously to prevent repeat frames from firing duplicate dials
-                setState(() => _isConnecting = true);
-                try {
-                  await _scannerController.stop();
-                  await _connectToPeer(rawValue);
-                } finally {
-                  if (mounted) {
-                    await Future.delayed(const Duration(seconds: 2));
-                    if (mounted) {
-                      await _scannerController.start();
-                    }
-                  }
-                }
-                break;
-              }
-            }
-          },
-        ),
-
-        // Viewfinder overlay
-        Center(
-          child: Container(
-            width: 250,
-            height: 250,
-            decoration: BoxDecoration(
-              border: Border.all(color: const Color(0xFF4ADE80), width: 2),
-              borderRadius: BorderRadius.circular(16),
-            ),
-          ),
-        ),
-
-        // Torch button
-        Positioned(
-          top: 16,
-          right: 16,
-          child: Container(
-            decoration: BoxDecoration(
-              color: Colors.black54,
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: IconButton(
-              icon: Icon(
-                _torchEnabled ? Icons.flash_on : Icons.flash_off,
-                color: _torchEnabled ? const Color(0xFF4ADE80) : Colors.white,
-              ),
-              onPressed: () {
-                _scannerController.toggleTorch();
-                setState(() => _torchEnabled = !_torchEnabled);
-              },
-            ),
-          ),
-        ),
-
-        // Hint bar
-        const Positioned(
-          bottom: 24,
-          left: 24,
-          right: 24,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final qrSize = math.min(constraints.maxWidth - 96, 260.0).clamp(160.0, 260.0);
+        return SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(24, 32, 24, 32),
           child: Center(
-            child: Text(
-              'Align QR code inside the box to connect',
-              style: TextStyle(color: Colors.white70, fontSize: 12, backgroundColor: Colors.black54),
-            ),
-          ),
-        ),
-
-        if (_isConnecting)
-          Container(
-            color: Colors.black87,
-            child: const Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 400),
               child: Column(
-                mainAxisSize: MainAxisSize.min,
                 children: [
-                  CircularProgressIndicator(color: Color(0xFF935F32)),
-                  SizedBox(height: 16),
-                  Text('Connecting to peer...', style: TextStyle(color: Colors.white)),
+                  // Always dark on white, whatever the theme: scanners need the contrast
+                  Semantics(
+                    image: true,
+                    label: 'Your connection code',
+                    child: Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: cs.outlineVariant),
+                      ),
+                      child: QrImageView(
+                        data: _currentBootstrapData,
+                        version: QrVersions.auto,
+                        size: qrSize,
+                        backgroundColor: Colors.white,
+                        eyeStyle: const QrEyeStyle(eyeShape: QrEyeShape.square, color: Color(0xFF12161C)),
+                        dataModuleStyle: const QrDataModuleStyle(
+                          dataModuleShape: QrDataModuleShape.square,
+                          color: Color(0xFF12161C),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  if (handle != null) Text('@$handle', style: theme.textTheme.titleLarge, textAlign: TextAlign.center),
+                  if (_nodeInfo != null) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      compactPeerId(_nodeInfo!.id),
+                      style: theme.textTheme.bodySmall!.copyWith(color: cs.onSurfaceVariant),
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                  const SizedBox(height: 16),
+                  Text(
+                    'Ask the other person to scan this from their Discover tab. You\'ll connect over Bluetooth or the local network.',
+                    textAlign: TextAlign.center,
+                    style: theme.textTheme.bodyMedium!.copyWith(color: cs.onSurfaceVariant),
+                  ),
+                  const SizedBox(height: 20),
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.copy, size: 20),
+                    label: const Text('Copy code as text'),
+                    onPressed: () {
+                      Clipboard.setData(ClipboardData(text: _currentBootstrapData));
+                      showNotice(context, 'Code copied', tone: NoticeTone.success, duration: const Duration(seconds: 2));
+                    },
+                  ),
                 ],
               ),
             ),
           ),
-      ],
+        );
+      },
+    );
+  }
+
+  Widget _buildScannerTab() {
+    if (_isCheckingPermission) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (!_hasCameraPermission) {
+      return StateMessage(
+        icon: Icons.no_photography_outlined,
+        title: 'Allow camera access to scan',
+        body: _cameraPermanentlyDenied
+            ? 'Camera access is turned off for Chatter. Turn it on in system settings, then come back.'
+            : 'Chatter only uses the camera to read other people\'s connection codes.',
+        action: FilledButton(
+          onPressed: _checkCameraPermission,
+          child: Text(_cameraPermanentlyDenied ? 'Open settings' : 'Allow camera'),
+        ),
+      );
+    }
+
+    // The navigation keeps this screen alive behind other tabs with tickers
+    // off; take the scanner out then, which stops the camera
+    if (!TickerMode.valuesOf(context).enabled) return const SizedBox.shrink();
+
+    final textTheme = Theme.of(context).textTheme;
+
+    // The camera feed is always dark, so the overlay uses fixed light-on-dark
+    // colours rather than the theme's
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final box = math.min(constraints.biggest.shortestSide * 0.68, 280.0);
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            MobileScanner(
+              controller: _scannerController,
+              onDetect: (capture) async {
+                if (_isConnecting) return;
+                final rawValue = capture.barcodes
+                    .map((b) => b.rawValue?.trim())
+                    .firstWhere((v) => v != null && v.isNotEmpty, orElse: () => null);
+                if (rawValue == null) return;
+
+                // Immediately set flag synchronously to prevent repeat frames from firing duplicate dials
+                setState(() => _isConnecting = true);
+                await _scannerController.stop();
+                final peerId = await _connectToPeer(rawValue);
+                if (peerId != null) {
+                  // Straight into the conversation; the camera stays off meanwhile
+                  await _openChat(peerId);
+                } else {
+                  await Future.delayed(const Duration(seconds: 2));
+                }
+                if (mounted && TickerMode.valuesOf(context).enabled) {
+                  await _scannerController.start();
+                }
+              },
+            ),
+
+            // Viewfinder
+            IgnorePointer(
+              child: Center(
+                child: Container(
+                  width: box,
+                  height: box,
+                  decoration: BoxDecoration(
+                    border: Border.all(color: AppTheme.ember, width: 3),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                ),
+              ),
+            ),
+
+            // Torch
+            Positioned(
+              top: 12,
+              right: 12,
+              child: IconButton(
+                tooltip: _torchEnabled ? 'Turn flashlight off' : 'Turn flashlight on',
+                isSelected: _torchEnabled,
+                style: IconButton.styleFrom(
+                  backgroundColor: Colors.black.withValues(alpha: 0.6),
+                  foregroundColor: Colors.white,
+                  minimumSize: const Size.square(48),
+                ),
+                icon: const Icon(Icons.flash_off),
+                selectedIcon: const Icon(Icons.flash_on, color: AppTheme.ember),
+                onPressed: () {
+                  _scannerController.toggleTorch();
+                  setState(() => _torchEnabled = !_torchEnabled);
+                },
+              ),
+            ),
+
+            // Hint
+            Positioned(
+              bottom: 24,
+              left: 24,
+              right: 24,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.65),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    'Point at someone\'s Chatter code to connect',
+                    textAlign: TextAlign.center,
+                    style: textTheme.bodyMedium!.copyWith(color: Colors.white),
+                  ),
+                ),
+              ),
+            ),
+
+            if (_isConnecting)
+              Semantics(
+                liveRegion: true,
+                label: 'Connecting',
+                child: ColoredBox(
+                  color: Colors.black.withValues(alpha: 0.85),
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const CircularProgressIndicator(color: AppTheme.ember),
+                        const SizedBox(height: 16),
+                        Text('Connecting…', style: textTheme.bodyLarge!.copyWith(color: Colors.white)),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 
   Widget _buildNearbyBleTab() {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.symmetric(vertical: 8),
       children: [
-        // BLE Broadcast Controls Card
-        Container(
-          padding: const EdgeInsets.all(16),
-          margin: const EdgeInsets.only(bottom: 20),
-          decoration: BoxDecoration(
-            color: const Color(0xFF1E1A17),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: const Color(0xFF2A2420)),
-          ),
+        SwitchListTile(
+          secondary: Icon(_isBleAdvertising ? Icons.bluetooth : Icons.bluetooth_disabled),
+          title: const Text('Visible to nearby phones'),
+          subtitle: Text(_isBleAdvertising
+              ? 'Phones running Chatter can find you over Bluetooth'
+              : 'Turn on so phones running Chatter can find you'),
+          value: _isBleAdvertising,
+          onChanged: _isTogglingBle ? null : (_) => _toggleBleAdvertising(),
+        ),
+        const Divider(),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 4, 4),
           child: Row(
             children: [
-              Icon(
-                Icons.bluetooth,
-                color: _isBleAdvertising ? const Color(0xFF4ADE80) : const Color(0xFF935F32),
-              ),
-              const SizedBox(width: 12),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      _isBleAdvertising ? 'BLE BROADCAST ACTIVE' : 'BLE OFFLINE BEACON',
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                    ),
-                    Text(
-                      _isBleAdvertising
-                          ? 'Broadcasting Chatter presence (persisted in storage)'
-                          : 'Tap BROADCAST so other phones running Chatter discover you',
-                      style: const TextStyle(color: Colors.grey, fontSize: 11),
-                    ),
-                  ],
+                child: Semantics(
+                  header: true,
+                  child: Text('Phones nearby', style: theme.textTheme.titleSmall!.copyWith(color: cs.primary)),
                 ),
               ),
-              TextButton(
-                onPressed: _toggleBleAdvertising,
-                style: TextButton.styleFrom(
-                  backgroundColor: _isBleAdvertising ? const Color(0xFF16A34A) : const Color(0xFF2A2420),
-                  foregroundColor: Colors.white,
-                ),
-                child: Text(_isBleAdvertising ? 'STOP' : 'BROADCAST'),
+              IconButton(
+                icon: const Icon(Icons.refresh),
+                onPressed: () => _bleService.startScan(),
+                tooltip: 'Scan again',
               ),
             ],
           ),
         ),
 
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            const Text('NEARBY BLUETOOTH NODES', style: TextStyle(color: Colors.grey, letterSpacing: 2, fontSize: 12)),
-            IconButton(
-              icon: const Icon(Icons.refresh, size: 18, color: Color(0xFF935F32)),
-              onPressed: () => _bleService.startScan(),
-              tooltip: 'Rescan BLE',
-            ),
-          ],
-        ),
-        const SizedBox(height: 8),
-
         if (_nearbyNodes.isEmpty)
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 32.0),
-            child: Center(
-              child: Column(
-                children: [
-                  const SizedBox(
-                    width: 24,
-                    height: 24,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF935F32)),
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.only(top: 2),
+                  child: SizedBox.square(dimension: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Looking for phones running Chatter', style: theme.textTheme.bodyLarge),
+                      const SizedBox(height: 4),
+                      Text(
+                        'They show up here when Chatter is open on them and they\'re visible to nearby phones.',
+                        style: theme.textTheme.bodyMedium!.copyWith(color: cs.onSurfaceVariant),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 16),
-                  Text(
-                    'Scanning for nearby Chatter devices...',
-                    style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
-                  ),
-                ],
-              ),
+                ),
+              ],
             ),
           )
         else
@@ -606,60 +588,49 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     );
   }
 
+  static ({IconData icon, String word}) _signalOf(NearbyNode node) => switch (node.signalStrength) {
+        'EXCELLENT' => (icon: Icons.signal_cellular_alt, word: 'Excellent signal'),
+        'GOOD' => (icon: Icons.signal_cellular_alt, word: 'Good signal'),
+        'FAIR' => (icon: Icons.signal_cellular_alt_2_bar, word: 'Fair signal'),
+        _ => (icon: Icons.signal_cellular_alt_1_bar, word: 'Weak signal'),
+      };
+
+  // Identified by peer ID, never by Bluetooth address: the address is a
+  // rotating private one that means nothing to the user
   Widget _buildLiveNodeTile(NearbyNode node) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      decoration: BoxDecoration(
-        color: node.isChatterPeer ? const Color(0xFF1A2E1D) : const Color(0xFF1E1A17),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(
-          color: node.isChatterPeer ? const Color(0xFF16A34A) : const Color(0xFF2A2420),
-          width: node.isChatterPeer ? 1.5 : 1.0,
-        ),
-      ),
-      child: ListTile(
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-        leading: Icon(
-          node.isChatterPeer ? Icons.bluetooth_connected : Icons.bluetooth,
-          color: node.isChatterPeer ? const Color(0xFF4ADE80) : Colors.grey,
-        ),
-        title: Row(
-          children: [
-            Expanded(
-              child: Text(
-                node.name,
-                style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  color: node.isChatterPeer ? Colors.white : Colors.grey.shade300,
-                ),
-              ),
-            ),
-            if (node.isChatterPeer)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF16A34A).withValues(alpha: 0.3),
-                  borderRadius: BorderRadius.circular(4),
-                  border: Border.all(color: const Color(0xFF4ADE80)),
-                ),
-                child: const Text('CHATTER APP', style: TextStyle(color: Color(0xFF4ADE80), fontSize: 10, fontWeight: FontWeight.bold)),
-              ),
-          ],
-        ),
-        subtitle: Text(
-          '${node.id} · ${node.rssi} dBm · ${node.signalStrength}',
-          style: const TextStyle(color: Colors.grey, fontSize: 11, fontFamily: 'monospace'),
-        ),
-        trailing: ElevatedButton(
-          onPressed: () => _handleBlePair(node),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: node.isChatterPeer ? const Color(0xFF16A34A) : const Color(0xFF2A2420),
-            foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final prefix = node.peerIdPrefix ?? '';
+    final peerId = api.peerIdForPrefix(prefix);
+    final linked = peerId != null && api.isBluetoothLinked(peerId);
+    final idText = peerId != null ? compactPeerId(peerId) : '$prefix…';
+    final signal = _signalOf(node);
+
+    return ListTile(
+      key: ValueKey(prefix),
+      leading: PeerAvatar(peerId: peerId ?? prefix, name: node.name, online: linked, size: 44),
+      title: Text(node.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleMedium),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(idText, maxLines: 1, overflow: TextOverflow.ellipsis),
+          const SizedBox(height: 2),
+          Wrap(
+            spacing: 6,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Icon(signal.icon, size: 16, color: cs.onSurfaceVariant),
+              Text(linked ? '${signal.word}, linked' : signal.word, style: theme.textTheme.bodySmall),
+            ],
           ),
-          child: Text(node.isChatterPeer ? 'CONNECT' : 'PAIR'),
-        ),
+        ],
       ),
+      trailing: linked
+          ? FilledButton(onPressed: () => _openChat(peerId), child: const Text('Chat'))
+          : OutlinedButton(
+              onPressed: _isConnecting ? null : () => _handleBlePair(node),
+              child: const Text('Connect'),
+            ),
     );
   }
 }

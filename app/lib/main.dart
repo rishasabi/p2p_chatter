@@ -1,70 +1,56 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'application_api.dart';
 import 'providers/theme_provider.dart';
+import 'screens/chat_screen.dart';
 import 'screens/discover_screen.dart';
 import 'screens/initialization_screen.dart';
 import 'screens/mesh_screen.dart';
 import 'screens/node_settings_screen.dart';
+import 'services/ble_service.dart';
 import 'services/embedded_node_service.dart';
+import 'services/settings_store.dart';
+import 'theme/app_theme.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // The bundled typefaces' licences, listed on the platform licences page
+  LicenseRegistry.addLicense(() async* {
+    for (final font in ['Unbounded', 'Figtree']) {
+      yield LicenseEntryWithLineBreaks([font], await rootBundle.loadString('assets/fonts/OFL-$font.txt'));
+    }
+  });
+  // Saved settings (theme etc.) must be in place before the first frame
+  await SettingsStore().load();
   // Ensure the embedded background Go service runs with the app as a single unit
   await EmbeddedNodeService().ensureStarted();
   runApp(const ProviderScope(child: P2PChatApp()));
 }
 
 class P2PChatApp extends ConsumerWidget {
-  const P2PChatApp({super.key});
+  /// The first screen; the startup flow unless a test starts elsewhere.
+  final Widget home;
+
+  const P2PChatApp({super.key, this.home = const InitializationScreen()});
+
+  static const title = 'Chatter';
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final themeMode = ref.watch(themeProvider);
 
-    // Minimal Dark Theme (Ember Signature)
-    final darkTheme = ThemeData(
-      brightness: Brightness.dark,
-      scaffoldBackgroundColor: const Color(0xFF14110F),
-      primaryColor: const Color(0xFF935F32),
-      appBarTheme: const AppBarTheme(
-        backgroundColor: Color(0xFF14110F),
-        elevation: 0,
-      ),
-      colorScheme: const ColorScheme.dark(
-        primary: Color(0xFF935F32),
-        secondary: Color(0xFF4ADE80),
-        surface: Color(0xFF1E1A17),
-      ),
-      fontFamily: 'Courier',
-      useMaterial3: true,
-    );
-
-    // Minimal Light Theme (Clean Paper / Sand aesthetic)
-    final lightTheme = ThemeData(
-      brightness: Brightness.light,
-      scaffoldBackgroundColor: const Color(0xFFF9F7F5),
-      primaryColor: const Color(0xFF935F32),
-      appBarTheme: const AppBarTheme(
-        backgroundColor: Color(0xFFF9F7F5),
-        elevation: 0,
-        foregroundColor: Colors.black87,
-      ),
-      colorScheme: const ColorScheme.light(
-        primary: Color(0xFF935F32),
-        secondary: Color(0xFF16A34A),
-        surface: Color(0xFFEFECE9),
-      ),
-      fontFamily: 'Courier',
-      useMaterial3: true,
-    );
-
     return MaterialApp(
-      title: 'Ember Mesh Chat',
+      title: title,
       debugShowCheckedModeBanner: false,
-      theme: lightTheme,
-      darkTheme: darkTheme,
+      theme: AppTheme.light(),
+      darkTheme: AppTheme.dark(),
       themeMode: themeMode,
-      home: const InitializationScreen(),
+      // Switch in one frame: cross-fading rebuilds every screen ~12 times
+      themeAnimationDuration: Duration.zero,
+      home: home,
     );
   }
 }
@@ -78,8 +64,18 @@ class MainNavigationScreen extends StatefulWidget {
 
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
   int _currentIndex = 0;
-  
+  final _api = ApplicationAPI();
+  // Tabs are built on first visit and then kept, so switching back is instant
+  // and doesn't reload anything
+  final _visited = <int>{0};
+
   late final List<Widget> _screens;
+
+  static const _destinations = [
+    (icon: Icons.forum_outlined, selected: Icons.forum, label: 'Chats'),
+    (icon: Icons.qr_code_scanner_outlined, selected: Icons.qr_code_scanner, label: 'Discover'),
+    (icon: Icons.settings_outlined, selected: Icons.settings, label: 'Settings'),
+  ];
 
   @override
   void initState() {
@@ -89,33 +85,91 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
       const DiscoverScreen(myBootstrapData: ''),
       const NodeSettingsScreen(),
     ];
+    _api.onMessage(_notify);
+    // Android 13+ asks once; elsewhere this is already granted
+    Permission.notification.request().then((_) {}, onError: (Object e) => debugPrint('Notification permission: $e'));
+  }
+
+  @override
+  void dispose() {
+    _api.removeOnMessage(_notify);
+    super.dispose();
+  }
+
+  // A message notification, unless that conversation is on screen right now
+  void _notify(Map<String, dynamic> message) {
+    final from = message['from'] as String;
+    final looking = WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed &&
+        ChatScreen.visiblePeerId == from;
+    if (looking) return;
+    BleService().showMessageNotification(
+      peerId: from,
+      title: _api.displayName(from),
+      body: message['content'] as String,
+    );
+  }
+
+  void _select(int index) {
+    FocusManager.instance.primaryFocus?.unfocus(); // a hidden tab keeps no keyboard up
+    setState(() {
+      _currentIndex = index;
+      _visited.add(index);
+    });
   }
 
   @override
   Widget build(BuildContext context) {
+    // Tablets and desktop windows get a side rail instead of a bottom bar
+    final wide = MediaQuery.sizeOf(context).width >= 720;
+    // Hidden tabs keep their state but have their animations paused (and
+    // Discover lets go of the camera, see DiscoverScreen._buildScannerTab)
+    final body = IndexedStack(
+      index: _currentIndex,
+      children: [
+        for (var i = 0; i < _screens.length; i++)
+          TickerMode(
+            enabled: i == _currentIndex,
+            child: _visited.contains(i) ? _screens[i] : const SizedBox.shrink(),
+          ),
+      ],
+    );
+
+    if (wide) {
+      return Scaffold(
+        body: Row(
+          children: [
+            NavigationRail(
+              selectedIndex: _currentIndex,
+              onDestinationSelected: _select,
+              labelType: NavigationRailLabelType.all,
+              destinations: [
+                for (final d in _destinations)
+                  NavigationRailDestination(
+                    icon: Icon(d.icon),
+                    selectedIcon: Icon(d.selected),
+                    label: Text(d.label),
+                  ),
+              ],
+            ),
+            const VerticalDivider(width: 1),
+            Expanded(child: body),
+          ],
+        ),
+      );
+    }
+
     return Scaffold(
-      body: _screens[_currentIndex],
+      body: body,
       bottomNavigationBar: NavigationBar(
         selectedIndex: _currentIndex,
-        onDestinationSelected: (index) => setState(() => _currentIndex = index),
-        backgroundColor: const Color(0xFF14110F),
-        indicatorColor: const Color(0xFF935F32).withValues(alpha: 0.3),
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.forum_outlined, color: Colors.grey),
-            selectedIcon: Icon(Icons.forum, color: Color(0xFF4ADE80)),
-            label: 'Chats',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.qr_code_scanner, color: Colors.grey),
-            selectedIcon: Icon(Icons.qr_code_scanner, color: Color(0xFF4ADE80)),
-            label: 'Discover',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.tune, color: Colors.grey),
-            selectedIcon: Icon(Icons.tune, color: Color(0xFF4ADE80)),
-            label: 'Config',
-          ),
+        onDestinationSelected: _select,
+        destinations: [
+          for (final d in _destinations)
+            NavigationDestination(
+              icon: Icon(d.icon),
+              selectedIcon: Icon(d.selected),
+              label: d.label,
+            ),
         ],
       ),
     );

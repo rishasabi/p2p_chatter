@@ -2,15 +2,29 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../services/settings_store.dart';
+
 class ThemeNotifier extends StateNotifier<ThemeMode> {
-  ThemeNotifier() : super(ThemeMode.dark); // Defaulting to Ember's dark aesthetic
+  // Saved choice, defaulting to Ember's dark aesthetic
+  ThemeNotifier() : super(_parse(SettingsStore().getString(SettingsStore.themeMode)));
+
+  static ThemeMode _parse(String? saved) => switch (saved) {
+        'light' => ThemeMode.light,
+        'system' => ThemeMode.system,
+        _ => ThemeMode.dark,
+      };
 
   void toggleTheme(bool isDark) {
-    state = isDark ? ThemeMode.dark : ThemeMode.light;
+    setThemeMode(isDark ? ThemeMode.dark : ThemeMode.light);
   }
 
   void setThemeMode(ThemeMode mode) {
     state = mode;
+    SettingsStore().set(SettingsStore.themeMode, switch (mode) {
+      ThemeMode.light => 'light',
+      ThemeMode.system => 'system',
+      ThemeMode.dark => 'dark',
+    });
   }
 }
 

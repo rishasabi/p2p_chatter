@@ -1,68 +1,125 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
+import 'package:flutter/services.dart';
 import '../application_api.dart';
+import '../services/api_service.dart';
+import '../theme/app_theme.dart';
+import '../widgets/feedback.dart';
+import '../widgets/peer_display.dart';
+import '../widgets/time_format.dart';
 
 class ChatScreen extends StatefulWidget {
   final String peerName;
   final String peerId;
-  final bool isOnline;
+
+  /// The conversation on screen, if any: its messages don't need a notification.
+  static String? visiblePeerId;
 
   const ChatScreen({
     super.key,
     required this.peerName,
     required this.peerId,
-    required this.isOnline,
   });
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
+class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final TextEditingController _msgController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final ApplicationAPI api = ApplicationAPI();
-  late bool _isOnline;
-  final List<Map<String, dynamic>> _messages = [];
+  // Live status: name (handle) and which transports reach the peer right now
+  late Map<String, dynamic> _status;
+  // The stored conversation; ApplicationAPI owns it and tells us when it changes
+  List<Map<String, dynamic>> _messages = const [];
   bool _isSending = false;
+  // The list is reversed, so offset 0 is the newest message. Away from it,
+  // arrivals are counted instead of yanking the reader down.
+  bool _awayFromLatest = false;
+  int _unseen = 0;
+  bool _hasDraft = false;
+
+  static const _nearLatest = 160.0;
 
   @override
   void initState() {
     super.initState();
-    _isOnline = widget.isOnline;
+    ChatScreen.visiblePeerId = widget.peerId;
+    _status = api.peerStatus(widget.peerId);
+    _messages = api.historyFor(widget.peerId);
 
     api.onPeerUpdate(_handlePeerUpdate);
-    api.onMessage(_handleIncomingMessage);
+    api.onHistoryChanged(_handleHistoryChanged);
+    WidgetsBinding.instance.addObserver(this);
+    _scrollController.addListener(_handleScroll);
+    _msgController.addListener(_handleDraftChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _markRead();
+    });
   }
 
   void _handlePeerUpdate(Map<String, dynamic> update) {
     if (mounted && update['id'] == widget.peerId) {
-      setState(() => _isOnline = update['online'] == true);
+      setState(() => _status = update);
     }
   }
 
-  void _handleIncomingMessage(Map<String, dynamic> msg) {
-    if (!mounted) return;
-    if (msg['from'] == widget.peerId) {
-      setState(() {
-        _messages.add({
-          'content': msg['content'] ?? '',
-          'isOutgoing': false,
-          'timestamp': DateTime.tryParse(msg['timestamp'] ?? '') ?? DateTime.now(),
-        });
-      });
-      _scrollToBottom();
+  void _handleHistoryChanged(String peerId) {
+    if (!mounted || peerId != widget.peerId) return;
+    final next = api.historyFor(peerId);
+    final added = next.length - _messages.length;
+    final sentByMe = added > 0 && next.last['isOutgoing'] == true;
+    setState(() {
+      _messages = next;
+      if (added > 0 && _awayFromLatest && !sentByMe) _unseen += added;
+    });
+    if (added > 0) {
+      // Our own message always comes into view; others only if we're at the end
+      if (sentByMe) _scrollToBottom();
+      _markRead(); // arrived while we're looking at the chat
     }
   }
+
+  void _handleScroll() {
+    final away = _scrollController.offset > _nearLatest;
+    if (away != _awayFromLatest) {
+      setState(() {
+        _awayFromLatest = away;
+        if (!away) _unseen = 0;
+      });
+    }
+  }
+
+  // Rebuilds the send button when the draft goes between empty and not
+  void _handleDraftChanged() {
+    final hasText = _msgController.text.trim().isNotEmpty;
+    if (hasText != _hasDraft) setState(() => _hasDraft = hasText);
+  }
+
+  // Only count messages as read while the user can actually see them
+  void _markRead() {
+    final state = WidgetsBinding.instance.lifecycleState;
+    if (state == null || state == AppLifecycleState.resumed) {
+      api.markRead(widget.peerId);
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _markRead();
+  }
+
+  bool get _isOnline => _status['online'] == true;
+
+  String get _peerName => _status['name'] as String? ?? widget.peerName;
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 250),
-          curve: Curves.easeOut,
-        );
+      if (!_scrollController.hasClients) return;
+      if (MediaQuery.disableAnimationsOf(context)) {
+        _scrollController.jumpTo(0);
+      } else {
+        _scrollController.animateTo(0, duration: const Duration(milliseconds: 250), curve: Curves.easeOut);
       }
     });
   }
@@ -72,26 +129,21 @@ class _ChatScreenState extends State<ChatScreen> {
     if (text.isEmpty || _isSending) return;
 
     _msgController.clear();
-    setState(() {
-      _isSending = true;
-      _messages.add({
-        'content': text,
-        'isOutgoing': true,
-        'timestamp': DateTime.now(),
-      });
-    });
-    _scrollToBottom();
+    setState(() => _isSending = true);
 
     try {
-      await api.sendMessage(text, widget.peerId);
+      // Adds the message to the conversation right away, then updates its status
+      final status = await api.sendMessage(text, widget.peerId);
+      if (status == 'queued' && mounted) {
+        showNotice(context, 'No one in range right now. Chatter keeps the message and sends it when someone is nearby.');
+      }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            backgroundColor: Colors.red.shade900,
-            content: Text('Failed to deliver: $e'),
-            duration: const Duration(seconds: 3),
-          ),
+        showNotice(
+          context,
+          'Not delivered. ${e is ApiException ? e.message : e}',
+          tone: NoticeTone.error,
+          duration: const Duration(seconds: 4),
         );
       }
     } finally {
@@ -101,10 +153,17 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  void _copyMessage(String content) {
+    Clipboard.setData(ClipboardData(text: content));
+    showNotice(context, 'Message copied', tone: NoticeTone.success, duration: const Duration(seconds: 2));
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    if (ChatScreen.visiblePeerId == widget.peerId) ChatScreen.visiblePeerId = null;
     api.removeOnPeerUpdate(_handlePeerUpdate);
-    api.removeOnMessage(_handleIncomingMessage);
+    api.removeOnHistoryChanged(_handleHistoryChanged);
     _msgController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -112,151 +171,451 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+
     return Scaffold(
       appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(widget.peerName, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 2),
-            Row(
-              children: [
-                Icon(Icons.circle, size: 8, color: _isOnline ? const Color(0xFF4ADE80) : Colors.grey),
-                const SizedBox(width: 6),
-                Text(
-                  _isOnline ? 'Online' : 'Offline', 
-                  style: TextStyle(fontSize: 11, color: _isOnline ? const Color(0xFF4ADE80) : Colors.grey)
-                ),
-              ],
-            )
-          ],
-        ),
-      ),
-      body: Column(
-        children: [
-          Expanded(
-            child: _messages.isEmpty
-                ? Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(32.0),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                            decoration: BoxDecoration(
-                              border: Border.all(color: const Color(0xFF935F32).withValues(alpha: 0.4)),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(Icons.lock_outline, size: 14, color: Color(0xFF935F32)),
-                                const SizedBox(width: 8),
-                                Text(
-                                  'P2P stream open with ${widget.peerName}',
-                                  style: const TextStyle(color: Colors.grey, fontSize: 12),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          const Text('Send a message to start communicating.', style: TextStyle(color: Colors.grey, fontSize: 12)),
-                        ],
-                      ),
-                    ),
-                  )
-                : ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.all(16),
-                    itemCount: _messages.length,
-                    itemBuilder: (context, index) {
-                      final item = _messages[index];
-                      final bool isOut = item['isOutgoing'] == true;
-                      final DateTime time = item['timestamp'] as DateTime;
-                      final timeStr = DateFormat('HH:mm').format(time);
-
-                      return Align(
-                        alignment: isOut ? Alignment.centerRight : Alignment.centerLeft,
-                        child: Container(
-                          margin: const EdgeInsets.symmetric(vertical: 4),
-                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                          constraints: BoxConstraints(
-                            maxWidth: MediaQuery.of(context).size.width * 0.75,
-                          ),
-                          decoration: BoxDecoration(
-                            color: isOut ? const Color(0xFF935F32) : const Color(0xFF1E1A17),
-                            borderRadius: BorderRadius.only(
-                              topLeft: const Radius.circular(16),
-                              topRight: const Radius.circular(16),
-                              bottomLeft: isOut ? const Radius.circular(16) : Radius.zero,
-                              bottomRight: isOut ? Radius.zero : const Radius.circular(16),
-                            ),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: isOut ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                item['content'] ?? '',
-                                style: const TextStyle(color: Colors.white, fontSize: 14),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(
-                                timeStr,
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  color: isOut ? Colors.white70 : Colors.grey.shade500,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-          ),
-          Container(
-            padding: const EdgeInsets.all(12),
-            color: const Color(0xFF14110F),
-            child: SafeArea(
-              child: Container(
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1E1A17),
-                  borderRadius: BorderRadius.circular(30),
-                ),
-                child: Row(
+        titleSpacing: 0,
+        title: Semantics(
+          header: true,
+          label: '$_peerName, ${reachSentence(_status)}',
+          excludeSemantics: true,
+          child: Row(
+            children: [
+              PeerAvatar(peerId: widget.peerId, name: _peerName, online: _isOnline, size: 40),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: TextField(
-                        controller: _msgController,
-                        style: const TextStyle(color: Colors.white),
-                        decoration: const InputDecoration(
-                          hintText: 'message the mesh', 
-                          hintStyle: TextStyle(color: Colors.grey), 
-                          border: InputBorder.none,
-                        ),
-                        onSubmitted: (_) => _handleSend(),
-                      ),
+                    Text(
+                      _peerName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.titleLarge,
                     ),
-                    Container(
-                      margin: const EdgeInsets.all(4),
-                      decoration: const BoxDecoration(
-                        color: Color(0xFF935F32),
-                        shape: BoxShape.circle,
-                      ),
-                      child: IconButton(
-                        icon: const Icon(Icons.arrow_upward, color: Colors.black, size: 20),
-                        onPressed: _handleSend,
+                    Text(
+                      reachSentence(_status),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall!.copyWith(
+                        color: _isOnline ? ChatterColors.of(context).reach : cs.onSurfaceVariant,
                       ),
                     ),
                   ],
                 ),
               ),
-            ),
-          )
+            ],
+          ),
+        ),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1),
+          child: Divider(height: 1, color: cs.outlineVariant),
+        ),
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            child: _messages.isEmpty ? _buildEmptyThread() : _buildThread(),
+          ),
+          _Composer(
+            controller: _msgController,
+            peerName: _peerName,
+            canSend: _hasDraft && !_isSending,
+            onSend: _handleSend,
+          ),
         ],
       ),
     );
   }
+
+  Widget _buildEmptyThread() {
+    return StateMessage(
+      icon: Icons.lock_outline,
+      title: 'Start your conversation with $_peerName',
+      body: 'Messages go straight to their phone over Wi-Fi or Bluetooth, '
+          'or hop through other phones running Chatter.',
+    );
+  }
+
+  Widget _buildThread() {
+    // Chronological entries: a day heading before each new day's first message
+    final entries = <Object>[];
+    String? newestOutgoingId;
+    for (var i = 0; i < _messages.length; i++) {
+      final m = _messages[i];
+      final time = m['timestamp'] as DateTime;
+      if (i == 0 || !isSameDay(_messages[i - 1]['timestamp'] as DateTime, time)) {
+        entries.add(time);
+      }
+      entries.add(i);
+      // Failed messages always say so; the status word goes on the newest that went out
+      if (m['isOutgoing'] == true && m['status'] != 'failed') newestOutgoingId = m['id'] as String;
+    }
+
+    bool continuesGroup(int a, int b) {
+      if (b < 0 || b >= _messages.length) return false;
+      final x = _messages[a], y = _messages[b];
+      final gap = (x['timestamp'] as DateTime).difference(y['timestamp'] as DateTime).abs();
+      return x['isOutgoing'] == y['isOutgoing'] &&
+          gap < const Duration(minutes: 3) &&
+          isSameDay(x['timestamp'] as DateTime, y['timestamp'] as DateTime);
+    }
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final bubbleMax = (constraints.maxWidth * 0.8).clamp(0.0, 560.0);
+        return Stack(
+          children: [
+            ListView.builder(
+              controller: _scrollController,
+              reverse: true,
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+              padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+              itemCount: entries.length,
+              itemBuilder: (context, index) {
+                final entry = entries[entries.length - 1 - index];
+                if (entry is DateTime) {
+                  return _DayHeading(key: ValueKey('day-${entry.toLocal().toIso8601String()}'), time: entry);
+                }
+                final i = entry as int;
+                final m = _messages[i];
+                return _MessageBubble(
+                  key: ValueKey(m['id']),
+                  message: m,
+                  peerName: _peerName,
+                  maxWidth: bubbleMax,
+                  groupedWithPrevious: continuesGroup(i, i - 1),
+                  groupedWithNext: continuesGroup(i, i + 1),
+                  showStatusWord: m['id'] == newestOutgoingId,
+                  onCopy: () => _copyMessage(m['content'] as String? ?? ''),
+                );
+              },
+            ),
+            if (_awayFromLatest)
+              Positioned(
+                right: 16,
+                bottom: 12,
+                child: _unseen > 0
+                    ? FilledButton.tonalIcon(
+                        onPressed: _scrollToBottom,
+                        icon: const Icon(Icons.arrow_downward, size: 20),
+                        label: Text(_unseen == 1 ? '1 new message' : '$_unseen new messages'),
+                      )
+                    : IconButton.filledTonal(
+                        onPressed: _scrollToBottom,
+                        tooltip: 'Jump to latest',
+                        icon: const Icon(Icons.arrow_downward),
+                      ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+// ── Sub-widgets ───────────────────────────────────────────────────────────────
+
+class _DayHeading extends StatelessWidget {
+  final DateTime time;
+  const _DayHeading({super.key, required this.time});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 16),
+      child: Center(
+        child: Semantics(
+          header: true,
+          child: Text(
+            formatDayHeading(time),
+            style: theme.textTheme.titleSmall!.copyWith(color: theme.colorScheme.onSurfaceVariant),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Words and icons for an outgoing message's progress. Every state has its
+/// own icon shape, so none of them depends on colour.
+({IconData icon, String word}) _deliveryOf(String? status) => switch (status) {
+      'read' => (icon: Icons.visibility_outlined, word: 'Read'),
+      'delivered' => (icon: Icons.done_all, word: 'Delivered'),
+      'sent' => (icon: Icons.check, word: 'Sent'),
+      'queued' => (icon: Icons.hourglass_empty, word: 'Waiting'),
+      'failed' => (icon: Icons.error_outline, word: 'Not delivered'),
+      _ => (icon: Icons.schedule, word: 'Sending'),
+    };
+
+class _MessageBubble extends StatelessWidget {
+  final Map<String, dynamic> message;
+  final String peerName;
+  final double maxWidth;
+  final bool groupedWithPrevious;
+  final bool groupedWithNext;
+  final bool showStatusWord;
+  final VoidCallback onCopy;
+
+  const _MessageBubble({
+    super.key,
+    required this.message,
+    required this.peerName,
+    required this.maxWidth,
+    required this.groupedWithPrevious,
+    required this.groupedWithNext,
+    required this.showStatusWord,
+    required this.onCopy,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final chatter = ChatterColors.of(context);
+    final isOut = message['isOutgoing'] == true;
+    final failed = isOut && message['status'] == 'failed';
+    final content = message['content'] as String? ?? '';
+    final timeStr = formatClock(context, message['timestamp'] as DateTime);
+    final delivery = _deliveryOf(message['status'] as String?);
+
+    final Color bg;
+    final Color fg;
+    if (failed) {
+      bg = cs.errorContainer;
+      fg = cs.onErrorContainer;
+    } else if (isOut) {
+      bg = chatter.bubbleOut;
+      fg = chatter.onBubbleOut;
+    } else {
+      bg = chatter.bubbleIn;
+      fg = chatter.onBubbleIn;
+    }
+    final meta = fg.withValues(alpha: 0.78);
+
+    // Rounded all round, tighter on the sender's side where bubbles of one
+    // burst meet; the last of a burst gets the brand mark's tail
+    const big = Radius.circular(20);
+    const small = Radius.circular(6);
+    final radius = BorderRadius.only(
+      topLeft: !isOut && groupedWithPrevious ? small : big,
+      topRight: isOut && groupedWithPrevious ? small : big,
+      bottomLeft: !isOut ? small : big,
+      bottomRight: isOut ? small : big,
+    );
+    final tail = groupedWithNext ? null : (isOut ? _Tail.right : _Tail.left);
+
+    final statusText = isOut ? (showStatusWord || failed ? delivery.word : null) : null;
+    // A burst from the other person shows its time once, on the last bubble;
+    // ours always show it, since each carries its own delivery status
+    final showMeta = isOut || !groupedWithNext;
+    final semanticLabel = [
+      isOut ? 'You' : peerName,
+      timeStr,
+      if (isOut) delivery.word,
+      content,
+    ].join(', ');
+
+    return Padding(
+      padding: EdgeInsets.only(top: groupedWithPrevious ? 2 : 10),
+      child: Align(
+        alignment: isOut ? Alignment.centerRight : Alignment.centerLeft,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: maxWidth),
+          child: Semantics(
+            label: semanticLabel,
+            onLongPressHint: 'Copy message',
+            onLongPress: onCopy,
+            excludeSemantics: true,
+            child: Material(
+              color: bg,
+              shape: _BubbleBorder(
+                radius: radius,
+                tail: tail,
+                side: !isOut && theme.brightness == Brightness.light
+                    ? BorderSide(color: cs.outlineVariant)
+                    : BorderSide.none,
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: InkWell(
+                onLongPress: onCopy,
+                child: Padding(
+                  padding: EdgeInsets.fromLTRB(14, 9, 14, showMeta ? 8 : 9),
+                  // As wide as the longer of the text and the time line, so
+                  // the time sits at the bubble's trailing edge either way
+                  child: IntrinsicWidth(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(content, style: theme.textTheme.bodyLarge!.copyWith(color: fg)),
+                        if (showMeta) ...[
+                          const SizedBox(height: 4),
+                          // Gaps are padding, not Wrap.spacing: Wrap leaves spacing
+                          // out of its intrinsic width, which made short bubbles
+                          // too narrow and pushed the tick onto its own line
+                          Wrap(
+                            alignment: WrapAlignment.end,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              Text(timeStr, style: theme.textTheme.bodySmall!.copyWith(color: meta)),
+                              if (isOut)
+                                Padding(
+                                  padding: const EdgeInsets.only(left: 4),
+                                  child: Icon(delivery.icon, size: MediaQuery.textScalerOf(context).scale(15), color: meta),
+                                ),
+                              if (statusText != null)
+                                Padding(
+                                  padding: const EdgeInsets.only(left: 4),
+                                  child: Text(
+                                    statusText,
+                                    style: theme.textTheme.bodySmall!.copyWith(color: fg, fontWeight: FontWeight.w600),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _Composer extends StatelessWidget {
+  final TextEditingController controller;
+  final String peerName;
+  final bool canSend;
+  final VoidCallback onSend;
+
+  const _Composer({
+    required this.controller,
+    required this.peerName,
+    required this.canSend,
+    required this.onSend,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    const pill = BorderRadius.all(Radius.circular(24));
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: cs.surface,
+        border: Border(top: BorderSide(color: cs.outlineVariant)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: controller,
+                  minLines: 1,
+                  maxLines: 6,
+                  keyboardType: TextInputType.multiline,
+                  textInputAction: TextInputAction.send,
+                  textCapitalization: TextCapitalization.sentences,
+                  decoration: InputDecoration(
+                    hintText: 'Message $peerName',
+                    hintMaxLines: 1,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                    border: OutlineInputBorder(borderRadius: pill, borderSide: BorderSide(color: cs.outlineVariant)),
+                    enabledBorder:
+                        OutlineInputBorder(borderRadius: pill, borderSide: BorderSide(color: cs.outlineVariant)),
+                    focusedBorder: OutlineInputBorder(borderRadius: pill, borderSide: BorderSide(color: cs.primary, width: 2)),
+                  ),
+                  onSubmitted: (_) => onSend(),
+                  // Keep the keyboard up between messages
+                  onEditingComplete: () {},
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton.filled(
+                onPressed: canSend ? onSend : null,
+                tooltip: 'Send',
+                iconSize: 22,
+                // Ember in both themes: sending is what lights your messages up
+                style: IconButton.styleFrom(
+                  minimumSize: const Size.square(48),
+                  backgroundColor: AppTheme.ember,
+                  foregroundColor: AppTheme.onEmber,
+                ),
+                icon: const Icon(Icons.arrow_upward),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+enum _Tail { left, right }
+
+/// A message bubble: a rounded rectangle, plus on the last bubble of a burst
+/// a tail at the sender's lower corner, cut like the one on Chatter's mark.
+class _BubbleBorder extends OutlinedBorder {
+  final BorderRadius radius;
+  final _Tail? tail;
+
+  const _BubbleBorder({required this.radius, this.tail, super.side});
+
+  Path _path(Rect rect) {
+    final body = Path()..addRRect(radius.toRRect(rect));
+    if (tail == null) return body;
+    final b = rect.bottom;
+    // Leans outward and down from the corner, like the mark's tail
+    final shape = tail == _Tail.left
+        ? (Path()
+          ..moveTo(rect.left + 2, b - 16)
+          ..lineTo(rect.left - 6, b + 4)
+          ..lineTo(rect.left + 18, b)
+          ..close())
+        : (Path()
+          ..moveTo(rect.right - 2, b - 16)
+          ..lineTo(rect.right + 6, b + 4)
+          ..lineTo(rect.right - 18, b)
+          ..close());
+    return Path.combine(PathOperation.union, body, shape);
+  }
+
+  @override
+  Path getOuterPath(Rect rect, {TextDirection? textDirection}) => _path(rect);
+
+  @override
+  Path getInnerPath(Rect rect, {TextDirection? textDirection}) => _path(rect.deflate(side.strokeInset));
+
+  @override
+  void paint(Canvas canvas, Rect rect, {TextDirection? textDirection}) {
+    if (side.style == BorderStyle.none) return;
+    canvas.drawPath(_path(rect), side.toPaint());
+  }
+
+  @override
+  _BubbleBorder copyWith({BorderSide? side}) => _BubbleBorder(radius: radius, tail: tail, side: side ?? this.side);
+
+  @override
+  ShapeBorder scale(double t) => _BubbleBorder(radius: radius * t, tail: tail, side: side.scale(t));
+
+  @override
+  bool operator ==(Object other) =>
+      other is _BubbleBorder && other.radius == radius && other.tail == tail && other.side == side;
+
+  @override
+  int get hashCode => Object.hash(radius, tail, side);
 }
