@@ -8,6 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 import '../application_api.dart';
 import '../models/node_info.dart';
 import '../services/ble_service.dart';
+import 'chat_screen.dart';
 
 class DiscoverScreen extends StatefulWidget {
   final String myBootstrapData;
@@ -66,13 +67,10 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
       }
     });
 
-    // Check persistent broadcast preference and auto-start if previously enabled
-    final broadcastPersisted = await _bleService.getBroadcastEnabled();
+    // ApplicationAPI starts the broadcast at launch; just reflect its state
+    final broadcastEnabled = await _bleService.getBroadcastEnabled();
     if (mounted) {
-      setState(() => _isBleAdvertising = broadcastPersisted);
-    }
-    if (broadcastPersisted) {
-      _startAdvertisingInternal();
+      setState(() => _isBleAdvertising = broadcastEnabled);
     }
 
     _bleService.startScan();
@@ -90,10 +88,11 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
       final info = await api.getNode();
       final btInfo = await _bleService.getDeviceBluetoothInfo();
 
-      // Unified offline QR connection payload (JSON)
+      // Unified offline QR connection payload (JSON). 'name' is our handle,
+      // so whoever scans it knows who they're talking to straight away.
       final payload = {
         'id': info.id,
-        'name': btInfo['name']?.isNotEmpty == true ? btInfo['name'] : 'Chatter Peer',
+        'name': api.myHandle ?? (btInfo['name']?.isNotEmpty == true ? btInfo['name'] : 'Chatter Peer'),
         if (btInfo['address']?.isNotEmpty == true && btInfo['address'] != '02:00:00:00:00:00')
           'bt': btInfo['address'],
         if (info.hasRoutableAddrs) 'addrs': info.routableAddrs,
@@ -113,23 +112,9 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     }
   }
 
-  Future<void> _startAdvertisingInternal() async {
-    final peerId = _nodeInfo?.id ?? 'chatter-node';
-    final btInfo = await _bleService.getDeviceBluetoothInfo();
-    final name = btInfo['name']?.isNotEmpty == true
-        ? btInfo['name']
-        : (peerId.length > 8 ? 'Chatter-${peerId.substring(0, 6)}' : 'Chatter');
-
-    await _bleService.startAdvertising(
-      peerId,
-      address: _currentBootstrapData,
-      name: name,
-    );
-  }
-
   Future<void> _toggleBleAdvertising() async {
     if (_isBleAdvertising) {
-      await _bleService.stopAdvertising();
+      await api.setBroadcastEnabled(false);
       if (mounted) {
         setState(() => _isBleAdvertising = false);
         ScaffoldMessenger.of(context).showSnackBar(
@@ -141,17 +126,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
         );
       }
     } else {
-      final peerId = _nodeInfo?.id ?? 'chatter-node';
-      final btInfo = await _bleService.getDeviceBluetoothInfo();
-      final name = btInfo['name']?.isNotEmpty == true
-          ? btInfo['name']
-          : (peerId.length > 8 ? 'Chatter-${peerId.substring(0, 6)}' : 'Chatter');
-
-      final started = await _bleService.startAdvertising(
-        peerId,
-        address: _currentBootstrapData,
-        name: name,
-      );
+      final started = await api.setBroadcastEnabled(true);
 
       if (mounted) {
         setState(() => _isBleAdvertising = started);
@@ -168,9 +143,22 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     }
   }
 
-  Future<void> _connectToPeer(String address) async {
+  /// Opens the conversation with [peerId] on top of the Discover screen.
+  Future<void> _openChat(String peerId) async {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ChatScreen(peerName: api.displayName(peerId), peerId: peerId),
+      ),
+    );
+  }
+
+  /// Connects to the peer in a scanned code. Returns its peer ID when the
+  /// connection succeeded and the code names the peer, otherwise null.
+  Future<String?> _connectToPeer(String address) async {
     final cleanAddr = address.trim();
-    if (cleanAddr.isEmpty) return;
+    if (cleanAddr.isEmpty) return null;
 
     setState(() => _isConnecting = true);
 
@@ -184,28 +172,10 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     );
 
     try {
-      if (cleanAddr.startsWith('{')) {
-        try {
-          final data = jsonDecode(cleanAddr) as Map<String, dynamic>;
-          final btMac = data['bt'] as String? ?? '';
-          final peerId = data['id'] as String? ?? '';
-          final addrs = data['addrs'] as List? ?? [];
+      // ApplicationAPI handles JSON QR payloads (Bluetooth first, then all TCP addrs)
+      final peerId = await api.connectPeer(cleanAddr);
 
-          if (btMac.isNotEmpty && btMac != '02:00:00:00:00:00') {
-            await _bleService.connectBluetooth(btMac, peerId: peerId);
-          } else if (addrs.isNotEmpty) {
-            await api.connectPeer(addrs.first.toString());
-          } else if (peerId.isNotEmpty) {
-            await api.connectPeer(peerId);
-          }
-        } catch (_) {
-          await api.connectPeer(cleanAddr);
-        }
-      } else {
-        await api.connectPeer(cleanAddr);
-      }
-
-      if (mounted) {
+      if (mounted && peerId == null) {
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -215,6 +185,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
           ),
         );
       }
+      return peerId;
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
@@ -226,6 +197,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
           ),
         );
       }
+      return null;
     } finally {
       if (mounted) {
         setState(() => _isConnecting = false);
@@ -240,14 +212,18 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         backgroundColor: const Color(0xFF1E1A17),
-        content: Text('Connecting to ${node.name} via Bluetooth RFCOMM...'),
+        content: Text('Connecting to ${node.name} via Bluetooth...'),
         duration: const Duration(seconds: 3),
       ),
     );
 
+    String? peerId;
     try {
-      await _bleService.connectBluetooth(node.id, peerId: node.name);
-      if (mounted) {
+      await api.connectBluetooth(node.id, peerId: node.peerIdPrefix, psm: node.psm);
+      // The handshake tells us exactly who answered
+      final prefix = node.peerIdPrefix;
+      peerId = prefix != null ? await api.waitForBluetoothPeer(prefix) : null;
+      if (mounted && peerId == null) {
         ScaffoldMessenger.of(context).hideCurrentSnackBar();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -273,6 +249,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
         setState(() => _isConnecting = false);
       }
     }
+    if (peerId != null) await _openChat(peerId);
   }
 
   @override
@@ -431,24 +408,23 @@ class _DiscoverScreenState extends State<DiscoverScreen> {
           controller: _scannerController,
           onDetect: (capture) async {
             if (_isConnecting) return;
-            for (final barcode in capture.barcodes) {
-              final rawValue = barcode.rawValue?.trim();
-              if (rawValue != null && rawValue.isNotEmpty) {
-                // Immediately set flag synchronously to prevent repeat frames from firing duplicate dials
-                setState(() => _isConnecting = true);
-                try {
-                  await _scannerController.stop();
-                  await _connectToPeer(rawValue);
-                } finally {
-                  if (mounted) {
-                    await Future.delayed(const Duration(seconds: 2));
-                    if (mounted) {
-                      await _scannerController.start();
-                    }
-                  }
-                }
-                break;
-              }
+            final rawValue = capture.barcodes
+                .map((b) => b.rawValue?.trim())
+                .firstWhere((v) => v != null && v.isNotEmpty, orElse: () => null);
+            if (rawValue == null) return;
+
+            // Immediately set flag synchronously to prevent repeat frames from firing duplicate dials
+            setState(() => _isConnecting = true);
+            await _scannerController.stop();
+            final peerId = await _connectToPeer(rawValue);
+            if (peerId != null) {
+              // Straight into the conversation; the camera stays off meanwhile
+              await _openChat(peerId);
+            } else {
+              await Future.delayed(const Duration(seconds: 2));
+            }
+            if (mounted) {
+              await _scannerController.start();
             }
           },
         ),

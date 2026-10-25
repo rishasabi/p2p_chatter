@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -13,6 +14,7 @@ import 'package:app/models/peer.dart';
 import 'package:app/providers/providers.dart';
 import 'package:app/services/api_service.dart';
 import 'package:app/services/embedded_node_service.dart';
+import 'package:app/services/local_store.dart';
 
 ChatterApiService mockApiService({
   String? healthBody,
@@ -67,6 +69,9 @@ ChatterApiService mockApiService({
 }
 
 void main() {
+  // No real file I/O from tests (it would also hang widget tests)
+  LocalStore.isTestMode = true;
+
   group('Models', () {
     test('NodeInfo parses JSON correctly', () {
       final info = NodeInfo.fromJson({
@@ -81,6 +86,8 @@ void main() {
     test('Peer parses JSON correctly', () {
       final peer = Peer.fromJson({'id': '12D3KooWXYZ'});
       expect(peer.id, '12D3KooWXYZ');
+      expect(peer.handle, isNull);
+      expect(Peer.fromJson({'id': '12D3KooWXYZ', 'handle': 'dave'}).handle, 'dave');
     });
 
     test('ChatMessage parses JSON correctly', () {
@@ -132,6 +139,94 @@ void main() {
       expect(body['peer_id'], '12D3KooWPeer');
       expect(body['content'], 'hello peer');
       svc.dispose();
+    });
+  });
+
+  group('ApplicationAPI Bluetooth messages', () {
+    TestWidgetsFlutterBinding.ensureInitialized();
+
+    // Simulates MainActivity invoking a callback on the Bluetooth method channel
+    Future<void> nativeCall(String method, Map<String, dynamic> args) =>
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .handlePlatformMessage(
+          'com.example.app/ble_advertiser',
+          const StandardMethodCodec().encodeMethodCall(MethodCall(method, args)),
+          (_) {},
+        );
+
+    test('message received with no chat open is kept in history', () async {
+      final api = ApplicationAPI()..stopPolling();
+      final ts = DateTime.utc(2026, 1, 2, 3, 4, 5);
+
+      await nativeCall('onBluetoothMessageReceived', {
+        'from': '12D3KooWBtPeer',
+        'content': 'over the air',
+        'timestamp': ts.millisecondsSinceEpoch.toString(),
+        'id': 1,
+      });
+
+      final history = api.historyFor('12D3KooWBtPeer');
+      expect(history, hasLength(1));
+      expect(history.single['content'], 'over the air');
+      expect(history.single['isOutgoing'], isFalse);
+      expect((history.single['timestamp'] as DateTime).toUtc(), ts);
+    });
+
+    test('handles are validated', () {
+      expect(ApplicationAPI.validateHandle('alice_01'), isNull);
+      expect(ApplicationAPI.validateHandle('  bob.k  '), isNull);
+      expect(ApplicationAPI.validateHandle('ab'), isNotNull);
+      expect(ApplicationAPI.validateHandle('a' * 21), isNotNull);
+      expect(ApplicationAPI.validateHandle('has space'), isNotNull);
+    });
+
+    test('peer status follows the Bluetooth link and keeps known peers', () async {
+      final api = ApplicationAPI()..stopPolling();
+      final updates = <Map<String, dynamic>>[];
+      void listener(Map<String, dynamic> u) {
+        if (u['id'] == '12D3KooWStatusPeer') updates.add(u);
+      }
+      api.onPeerUpdate(listener);
+
+      await nativeCall('onBluetoothPeerConnected', {
+        'peerId': '12D3KooWStatusPeer',
+        'name': 'carol',
+        'address': '11:22:33:44:55:66',
+        'addrs': ['/ip4/192.168.1.9/tcp/4001/p2p/12D3KooWStatusPeer'],
+      });
+      var status = api.peerStatus('12D3KooWStatusPeer');
+      expect(status['name'], 'carol'); // handle from the handshake
+      expect(status['type'], 'BLUETOOTH');
+      expect(status['online'], isTrue);
+
+      await nativeCall('onBluetoothPeerDisconnected', {'peerId': '12D3KooWStatusPeer'});
+      status = api.peerStatus('12D3KooWStatusPeer');
+      expect(status['type'], 'OFFLINE');
+      // Still a known contact, so it stays in the list and can be reconnected
+      expect(api.peers.map((p) => p['id']), contains('12D3KooWStatusPeer'));
+
+      // One notification per actual change
+      expect(updates.map((u) => u['type']), ['BLUETOOTH', 'OFFLINE']);
+      api.removeOnPeerUpdate(listener);
+    });
+
+    test('send to a dropped Bluetooth peer fails clearly and is marked', () async {
+      final api = ApplicationAPI()..stopPolling();
+      await nativeCall('onBluetoothPeerConnected', {
+        'peerId': '12D3KooWGonePeer',
+        'name': 'Gone Phone',
+        'address': 'AA:BB:CC:DD:EE:FF',
+      });
+      await nativeCall('onBluetoothPeerDisconnected', {'peerId': '12D3KooWGonePeer'});
+
+      await expectLater(
+        api.sendMessage('anyone there?', '12D3KooWGonePeer'),
+        throwsA(isA<ApiException>()
+            .having((e) => e.message, 'message', contains('Bluetooth'))),
+      );
+      final last = api.historyFor('12D3KooWGonePeer').last;
+      expect(last['content'], 'anyone there?');
+      expect(last['failed'], isTrue);
     });
   });
 

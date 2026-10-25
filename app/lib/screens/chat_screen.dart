@@ -1,17 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../application_api.dart';
+import '../services/api_service.dart';
 
 class ChatScreen extends StatefulWidget {
   final String peerName;
   final String peerId;
-  final bool isOnline;
 
   const ChatScreen({
     super.key,
     required this.peerName,
     required this.peerId,
-    required this.isOnline,
   });
 
   @override
@@ -22,14 +21,16 @@ class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _msgController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final ApplicationAPI api = ApplicationAPI();
-  late bool _isOnline;
+  // Live status: name (handle) and which transports reach the peer right now
+  late Map<String, dynamic> _status;
   final List<Map<String, dynamic>> _messages = [];
   bool _isSending = false;
 
   @override
   void initState() {
     super.initState();
-    _isOnline = widget.isOnline;
+    _status = api.peerStatus(widget.peerId);
+    _messages.addAll(api.historyFor(widget.peerId));
 
     api.onPeerUpdate(_handlePeerUpdate);
     api.onMessage(_handleIncomingMessage);
@@ -37,8 +38,19 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _handlePeerUpdate(Map<String, dynamic> update) {
     if (mounted && update['id'] == widget.peerId) {
-      setState(() => _isOnline = update['online'] == true);
+      setState(() => _status = update);
     }
+  }
+
+  bool get _isOnline => _status['online'] == true;
+
+  String get _peerName => _status['name'] as String? ?? widget.peerName;
+
+  String get _statusText {
+    if (!_isOnline) return 'Offline';
+    final wifi = _status['wifi'] == true;
+    final bt = _status['bt'] == true;
+    return 'Online · ${wifi && bt ? 'Wi-Fi + Bluetooth' : wifi ? 'Wi-Fi' : 'Bluetooth'}';
   }
 
   void _handleIncomingMessage(Map<String, dynamic> msg) {
@@ -72,13 +84,14 @@ class _ChatScreenState extends State<ChatScreen> {
     if (text.isEmpty || _isSending) return;
 
     _msgController.clear();
+    final entry = <String, dynamic>{
+      'content': text,
+      'isOutgoing': true,
+      'timestamp': DateTime.now(),
+    };
     setState(() {
       _isSending = true;
-      _messages.add({
-        'content': text,
-        'isOutgoing': true,
-        'timestamp': DateTime.now(),
-      });
+      _messages.add(entry);
     });
     _scrollToBottom();
 
@@ -86,10 +99,11 @@ class _ChatScreenState extends State<ChatScreen> {
       await api.sendMessage(text, widget.peerId);
     } catch (e) {
       if (mounted) {
+        setState(() => entry['failed'] = true);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             backgroundColor: Colors.red.shade900,
-            content: Text('Failed to deliver: $e'),
+            content: Text('Failed to deliver: ${e is ApiException ? e.message : e}'),
             duration: const Duration(seconds: 3),
           ),
         );
@@ -117,14 +131,14 @@ class _ChatScreenState extends State<ChatScreen> {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(widget.peerName, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            Text(_peerName, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 2),
             Row(
               children: [
                 Icon(Icons.circle, size: 8, color: _isOnline ? const Color(0xFF4ADE80) : Colors.grey),
                 const SizedBox(width: 6),
                 Text(
-                  _isOnline ? 'Online' : 'Offline', 
+                  _statusText,
                   style: TextStyle(fontSize: 11, color: _isOnline ? const Color(0xFF4ADE80) : Colors.grey)
                 ),
               ],
@@ -154,7 +168,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                 const Icon(Icons.lock_outline, size: 14, color: Color(0xFF935F32)),
                                 const SizedBox(width: 8),
                                 Text(
-                                  'P2P stream open with ${widget.peerName}',
+                                  'P2P stream open with $_peerName',
                                   style: const TextStyle(color: Colors.grey, fontSize: 12),
                                 ),
                               ],
@@ -173,8 +187,10 @@ class _ChatScreenState extends State<ChatScreen> {
                     itemBuilder: (context, index) {
                       final item = _messages[index];
                       final bool isOut = item['isOutgoing'] == true;
+                      final bool failed = item['failed'] == true;
                       final DateTime time = item['timestamp'] as DateTime;
-                      final timeStr = DateFormat('HH:mm').format(time);
+                      // The Go node stamps messages in UTC; show local time
+                      final timeStr = DateFormat('HH:mm').format(time.toLocal());
 
                       return Align(
                         alignment: isOut ? Alignment.centerRight : Alignment.centerLeft,
@@ -201,12 +217,23 @@ class _ChatScreenState extends State<ChatScreen> {
                                 style: const TextStyle(color: Colors.white, fontSize: 14),
                               ),
                               const SizedBox(height: 4),
-                              Text(
-                                timeStr,
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  color: isOut ? Colors.white70 : Colors.grey.shade500,
-                                ),
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (failed) ...[
+                                    const Icon(Icons.error_outline, size: 12, color: Color(0xFFFECACA)),
+                                    const SizedBox(width: 4),
+                                  ],
+                                  Text(
+                                    failed ? 'not delivered · $timeStr' : timeStr,
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      color: failed
+                                          ? const Color(0xFFFECACA)
+                                          : (isOut ? Colors.white70 : Colors.grey.shade500),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ],
                           ),

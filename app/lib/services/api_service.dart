@@ -54,6 +54,11 @@ class ChatterApiService {
     return NodeInfo.fromJson(response);
   }
 
+  /// Sets this node's handle; the node shares it with every peer it connects to.
+  Future<void> setHandle(String handle) async {
+    await _post('/profile', {'handle': handle});
+  }
+
   // ── Peers ───────────────────────────────────────────────────────────────────
 
   /// Returns the list of currently connected peers.

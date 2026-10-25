@@ -19,15 +19,19 @@ class _MeshScreenState extends State<MeshScreen> {
   @override
   void initState() {
     super.initState();
+    peers = api.peers;
+    _isLoading = peers.isEmpty;
+    filteredPeers = List.from(peers);
     _loadPeers();
     _searchController.addListener(_filterPeers);
     api.onPeerUpdate(_handlePeerUpdate);
   }
 
+  // Status changes are pushed as they happen (Wi-Fi or Bluetooth link up/down)
   void _handlePeerUpdate(Map<String, dynamic> update) {
-    if (mounted) {
-      _loadPeers();
-    }
+    if (!mounted) return;
+    peers = api.peers;
+    _filterPeers();
   }
 
   Future<void> _loadPeers() async {
@@ -169,14 +173,17 @@ class _MeshScreenState extends State<MeshScreen> {
                                 child: Text(initial, style: const TextStyle(color: Colors.white, fontSize: 13)),
                               ),
                               title: Text(name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                              subtitle: Text(peer['type'] ?? 'DIRECT P2P', style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
+                              subtitle: Text(
+                                '${peer['type'] ?? 'OFFLINE'} · ${(peer['id'] as String).length > 12 ? '${(peer['id'] as String).substring(0, 12)}…' : peer['id']}',
+                                style: TextStyle(fontSize: 10, color: Colors.grey.shade500),
+                              ),
                               trailing: Icon(
                                 Icons.circle, 
                                 size: 10, 
                                 color: isOnline ? const Color(0xFF4ADE80) : Colors.grey
                               ),
                               onTap: () => Navigator.push(context, MaterialPageRoute(
-                                builder: (_) => ChatScreen(peerName: name, peerId: peer['id'], isOnline: isOnline),
+                                builder: (_) => ChatScreen(peerName: name, peerId: peer['id']),
                               )),
                             );
                           },

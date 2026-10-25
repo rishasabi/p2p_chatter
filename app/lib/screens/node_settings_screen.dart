@@ -108,7 +108,11 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
 
           // Node Identity
           ListTile(
-            title: const Text('This node', style: TextStyle(fontWeight: FontWeight.bold)),
+            // The handle is bound to this PeerID; peers see it instead of the ID
+            title: Text(
+              api.myHandle != null ? '@${api.myHandle}' : 'This node',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
             subtitle: Text(peerIdDisplay, style: const TextStyle(color: Colors.grey, fontFamily: 'monospace')),
             trailing: _nodeInfo != null
                 ? IconButton(
