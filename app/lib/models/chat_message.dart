@@ -17,6 +17,10 @@ class ChatMessage {
   /// Neighbour the message arrived from; differs from [from] when relayed.
   final String? via;
 
+  /// The channel it was posted to (an open room's name or a private room's
+  /// tag), or null for a direct message.
+  final String? room;
+
   const ChatMessage({
     required this.id,
     required this.from,
@@ -26,6 +30,7 @@ class ChatMessage {
     this.msgId,
     this.handle,
     this.via,
+    this.room,
   });
 
   factory ChatMessage.fromJson(Map<String, dynamic> json) => ChatMessage(
@@ -36,6 +41,7 @@ class ChatMessage {
         msgId: json['msg_id'] as String?,
         handle: json['handle'] as String?,
         via: json['via'] as String?,
+        room: (json['room'] as String?)?.isEmpty == true ? null : json['room'] as String?,
       );
 
   /// Whether another peer relayed this message to us.

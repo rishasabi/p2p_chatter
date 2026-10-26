@@ -127,6 +127,47 @@ class ChatterApiService {
     return body['status'] as String? ?? 'sent';
   }
 
+  // ── Channels ─────────────────────────────────────────────────────────────────
+
+  /// Posts [content] to a channel ([room]: an open room's name or a private
+  /// room's tag). Returns 'sent', or 'queued' when no one is in range.
+  Future<String> sendRoom(String room, String content, {String? id}) async {
+    final body = await _post('/message', {
+      'room': room,
+      'content': content,
+      if (id != null) 'id': id,
+    });
+    return body['status'] as String? ?? 'sent';
+  }
+
+  /// Joins channel [name] and returns the ID it goes by: its name, or for a
+  /// private channel (with [passphrase]) a tag derived from its key.
+  Future<String> joinRoom(String name, {String? passphrase}) async {
+    final body = await _post('/rooms', {
+      'name': name,
+      if (passphrase != null && passphrase.isNotEmpty) 'passphrase': passphrase,
+    });
+    return body['room'] as String;
+  }
+
+  /// Stops reading private channel [room].
+  Future<void> leaveRoom(String room) async {
+    try {
+      final response = await _client
+          .delete(
+            Uri.parse('$baseUrl/rooms'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'room': room}),
+          )
+          .timeout(const Duration(seconds: 10));
+      _assertOk(response);
+    } on ApiException {
+      rethrow;
+    } catch (e) {
+      throw ApiException('Network error: $e');
+    }
+  }
+
   // ── Receipts ─────────────────────────────────────────────────────────────────
 
   /// Receipts from peers for messages we sent, after [afterId].

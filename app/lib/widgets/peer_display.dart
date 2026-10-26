@@ -134,3 +134,26 @@ class _NodePainter extends CustomPainter {
   @override
   bool shouldRepaint(_NodePainter oldDelegate) => true;
 }
+
+/// A channel's mark in lists and headers: a # for an open channel, a lock for
+/// a private one, on a neutral disc (ember means "you"; peer hues mean people).
+class ChannelAvatar extends StatelessWidget {
+  final bool private;
+  final double size;
+
+  const ChannelAvatar({super.key, required this.private, this.size = 48});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return ExcludeSemantics(
+      child: DecoratedBox(
+        decoration: BoxDecoration(color: cs.secondaryContainer, shape: BoxShape.circle),
+        child: SizedBox.square(
+          dimension: size,
+          child: Icon(private ? Icons.lock_outline : Icons.tag, size: size * 0.5, color: cs.onSecondaryContainer),
+        ),
+      ),
+    );
+  }
+}

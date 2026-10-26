@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import '../application_api.dart';
 import '../services/api_service.dart';
@@ -10,6 +11,8 @@ import '../widgets/peer_display.dart';
 import '../widgets/peer_identity.dart';
 import '../widgets/time_format.dart';
 
+/// A conversation: with one peer, or in a channel when [peerId] is a
+/// channel's conversation ID (see [ApplicationAPI.channelConversation]).
 class ChatScreen extends StatefulWidget {
   final String peerName;
   final String peerId;
@@ -42,6 +45,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   bool _awayFromLatest = false;
   int _unseen = 0;
   bool _hasDraft = false;
+  late final bool _isChannel = ApplicationAPI.isChannel(widget.peerId);
+  // The channel's name, privacy and unread count; null for a direct chat
+  Map<String, dynamic>? _channel;
 
   static const _nearLatest = 160.0;
 
@@ -49,7 +55,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     ChatScreen.visiblePeerId = widget.peerId;
-    _status = api.peerStatus(widget.peerId);
+    _status = _isChannel ? const {} : api.peerStatus(widget.peerId);
+    _channel = api.channelStatus(widget.peerId);
     _messages = api.historyFor(widget.peerId);
     // Whatever was being typed here last time, left or not
     _msgController.text = _drafts.getDraft(widget.peerId);
@@ -66,7 +73,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   void _handlePeerUpdate(Map<String, dynamic> update) {
-    if (mounted && update['id'] == widget.peerId) {
+    if (!mounted) return;
+    if (_isChannel) {
+      setState(() {}); // an author's name or trust badge may have changed
+    } else if (update['id'] == widget.peerId) {
       setState(() => _status = update);
     }
   }
@@ -77,6 +87,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final added = next.length - _messages.length;
     final sentByMe = added > 0 && next.last['isOutgoing'] == true;
     setState(() {
+      _channel = api.channelStatus(widget.peerId);
       _messages = next;
       if (added > 0 && _awayFromLatest && !sentByMe) _unseen += added;
     });
@@ -122,7 +133,30 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   bool get _isOnline => _status['online'] == true;
 
-  String get _peerName => _status['name'] as String? ?? widget.peerName;
+  String get _peerName =>
+      _isChannel ? '#${_channel?['name'] ?? widget.peerName}' : _status['name'] as String? ?? widget.peerName;
+
+  bool get _isPrivateChannel => _channel?['private'] == true;
+
+  Future<void> _leaveChannel() async {
+    final leave = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Leave $_peerName?'),
+        content: Text(_isPrivateChannel
+            ? 'You\'ll stop seeing its posts. To come back, you\'ll need its name and passphrase again.'
+            : 'You\'ll stop seeing its posts. You can join again any time.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Leave')),
+        ],
+      ),
+    );
+    if (leave != true || !mounted) return;
+    await api.leaveChannel(widget.peerId);
+    _drafts.clearDraft(widget.peerId);
+    if (mounted) Navigator.of(context).pop();
+  }
 
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -199,7 +233,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final conflict = _status['handleConflict'] == true;
 
     return Scaffold(
-      appBar: AppBar(
+      appBar: _isChannel ? _buildChannelAppBar(theme) : AppBar(
         titleSpacing: 0,
         title: Semantics(
           header: true,
@@ -286,7 +320,65 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
+  PreferredSizeWidget _buildChannelAppBar(ThemeData theme) {
+    final cs = theme.colorScheme;
+    final about = _isPrivateChannel
+        ? 'Private: only phones with the passphrase can read it'
+        : 'Open: every phone in range can read it';
+    return AppBar(
+      titleSpacing: 0,
+      title: Semantics(
+        header: true,
+        label: '$_peerName channel, $about',
+        excludeSemantics: true,
+        child: Row(
+          children: [
+            ChannelAvatar(private: _isPrivateChannel, size: 40),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(_peerName, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleLarge),
+                  Text(
+                    about,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall!.copyWith(color: cs.onSurfaceVariant),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        PopupMenuButton<void>(
+          tooltip: 'Channel options',
+          itemBuilder: (_) => [
+            PopupMenuItem(onTap: _leaveChannel, child: const Text('Leave channel')),
+          ],
+        ),
+        const SizedBox(width: 4),
+      ],
+      bottom: PreferredSize(
+        preferredSize: const Size.fromHeight(1),
+        child: Divider(height: 1, color: cs.outlineVariant),
+      ),
+    );
+  }
+
   Widget _buildEmptyThread() {
+    if (_isChannel) {
+      return StateMessage(
+        icon: _isPrivateChannel ? Icons.lock_outline : Icons.tag,
+        title: 'Nothing in $_peerName yet',
+        body: _isPrivateChannel
+            ? 'Posts here hop from phone to phone, but only phones that joined with the passphrase can read them.'
+            : 'Posts here reach every phone in range running Chatter, and hop on through them to phones further away.',
+      );
+    }
     return StateMessage(
       icon: Icons.lock_outline,
       title: 'Start your conversation with $_peerName',
@@ -315,6 +407,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       final x = _messages[a], y = _messages[b];
       final gap = (x['timestamp'] as DateTime).difference(y['timestamp'] as DateTime).abs();
       return x['isOutgoing'] == y['isOutgoing'] &&
+          x['author'] == y['author'] && // in a channel, one burst is one person's
           gap < const Duration(minutes: 3) &&
           isSameDay(x['timestamp'] as DateTime, y['timestamp'] as DateTime);
     }
@@ -337,10 +430,22 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 }
                 final i = entry as int;
                 final m = _messages[i];
+                final author = m['author'] as String?;
                 return _MessageBubble(
                   key: ValueKey(m['id']),
                   message: m,
-                  peerName: _peerName,
+                  peerName: author != null ? api.displayName(author) : _peerName,
+                  // In a channel, who wrote it heads each burst: anyone can pick
+                  // a name, so the end of their peer ID and any badge go with it
+                  author: author != null && m['isOutgoing'] != true && !continuesGroup(i, i - 1)
+                      ? _AuthorLine(
+                          peerId: author,
+                          name: api.displayName(author),
+                          verified: api.isVerified(author),
+                          conflict: api.hasHandleConflict(author),
+                          onTap: () => showPeerIdentitySheet(context, author),
+                        )
+                      : null,
                   maxWidth: bubbleMax,
                   groupedWithPrevious: continuesGroup(i, i - 1),
                   groupedWithNext: continuesGroup(i, i + 1),
@@ -416,6 +521,9 @@ class _MessageBubble extends StatelessWidget {
   final bool showStatusWord;
   final VoidCallback onCopy;
 
+  /// Who wrote it, shown at the top (channels only).
+  final _AuthorLine? author;
+
   const _MessageBubble({
     super.key,
     required this.message,
@@ -425,6 +533,7 @@ class _MessageBubble extends StatelessWidget {
     required this.groupedWithNext,
     required this.showStatusWord,
     required this.onCopy,
+    this.author,
   });
 
   @override
@@ -470,6 +579,8 @@ class _MessageBubble extends StatelessWidget {
     final showMeta = isOut || !groupedWithNext;
     final semanticLabel = [
       isOut ? 'You' : peerName,
+      if (author?.verified == true) 'verified contact',
+      if (author?.conflict == true) 'impersonation warning',
       timeStr,
       if (isOut) delivery.word,
       content,
@@ -485,6 +596,9 @@ class _MessageBubble extends StatelessWidget {
             label: semanticLabel,
             onLongPressHint: 'Copy message',
             onLongPress: onCopy,
+            customSemanticsActions: {
+              if (author != null) const CustomSemanticsAction(label: 'Show who wrote it'): author!.onTap,
+            },
             excludeSemantics: true,
             child: Material(
               color: bg,
@@ -507,6 +621,7 @@ class _MessageBubble extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       mainAxisSize: MainAxisSize.min,
                       children: [
+                        if (author != null) ...[author!, const SizedBox(height: 4)],
                         MessageText(content, style: theme.textTheme.bodyLarge!.copyWith(color: fg)),
                         if (showMeta) ...[
                           const SizedBox(height: 4),
@@ -542,6 +657,57 @@ class _MessageBubble extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// The top line of a channel post: the author's node, name and badge, and
+/// the end of their peer ID, which no one else can copy. Opens their identity.
+class _AuthorLine extends StatelessWidget {
+  final String peerId;
+  final String name;
+  final bool verified;
+  final bool conflict;
+  final VoidCallback onTap;
+
+  const _AuthorLine({
+    required this.peerId,
+    required this.name,
+    required this.verified,
+    required this.conflict,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final fg = ChatterColors.of(context).onBubbleIn;
+    final idTail = peerId.length > 6 ? '…${peerId.substring(peerId.length - 6)}' : peerId;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(6),
+      child: Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(right: 6),
+            child: PeerAvatar(peerId: peerId, name: name, size: 20),
+          ),
+          Text(name, style: theme.textTheme.labelLarge!.copyWith(color: fg, fontWeight: FontWeight.w700)),
+          if (verified || conflict)
+            Padding(
+              padding: const EdgeInsets.only(left: 4),
+              child: TrustMark(verified: verified, conflict: conflict, size: 16),
+            ),
+          Padding(
+            padding: const EdgeInsets.only(left: 6),
+            child: Text(
+              idTail,
+              style: theme.textTheme.bodySmall!.copyWith(color: fg.withValues(alpha: 0.78), fontFamily: 'monospace'),
+            ),
+          ),
+        ],
       ),
     );
   }

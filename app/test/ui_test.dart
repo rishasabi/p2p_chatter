@@ -400,6 +400,105 @@ void main() {
     }
   });
 
+  group('Channels', () {
+    setUp(() => ApplicationAPI().stopPolling());
+
+    ChatMessage post(String from, String id, String content, String handle, {String room = 'general'}) =>
+        ChatMessage(id: 0, from: from, content: content, timestamp: DateTime.now(), msgId: id, handle: handle, room: room);
+
+    testWidgets('the Chats list has a Channels view, and a channel shows who wrote each post', (tester) async {
+      await setScreen(tester, const Size(390, 900));
+      final api = ApplicationAPI()..stopPolling();
+      const medic = '12D3KooWUiChanMedicA1';
+      const fake = '12D3KooWUiChanFakeZ9x8Q7';
+      api.receiveFromNode(post(medic, 'cp-1', 'Triage moved to **tent 4**', 'chan_medic'));
+      api.receiveFromNode(post(fake, 'cp-2', 'Everyone to the bridge', 'Chan_Medic'));
+
+      await tester.pumpWidget(host(const MeshScreen()));
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(find.textContaining('Channels'));
+      await tester.pump();
+      expect(find.text('#general'), findsOneWidget);
+      expect(find.textContaining('Everyone to the bridge'), findsOneWidget);
+
+      await tester.tap(find.text('#general'));
+      await tester.pumpAndSettle();
+      expect(find.text('Open: every phone in range can read it'), findsOneWidget);
+      // Each author by name and the end of their peer ID; the lookalike is flagged
+      expect(find.text('chan_medic'), findsOneWidget);
+      expect(find.text('…${medic.substring(medic.length - 6)}'), findsOneWidget);
+      expect(find.text('Chan_Medic (#${fake.substring(fake.length - 4)})'), findsOneWidget);
+      expect(find.byIcon(Icons.warning_amber_rounded), findsOneWidget);
+
+      // Tapping an author opens their identity
+      await tester.tap(find.text('chan_medic'));
+      await tester.pumpAndSettle();
+      expect(find.text(medic), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(seconds: 1));
+    });
+
+    testWidgets('join or create a channel, with its name checked', (tester) async {
+      await setScreen(tester, const Size(390, 900));
+      await tester.pumpWidget(host(const MeshScreen()));
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(find.textContaining('Channels'));
+      await tester.pump();
+      await tester.tap(find.text('Join or create a channel'));
+      await tester.pumpAndSettle();
+
+      final nameField = find.widgetWithText(TextField, 'Channel name');
+      await tester.enterText(nameField, 'Legal Aid');
+      await tester.tap(find.text('Join'));
+      await tester.pump();
+      expect(find.text('Lowercase letters, numbers and single dashes only'), findsOneWidget);
+
+      // Private needs a real passphrase
+      await tester.tap(find.text('Private'));
+      await tester.pump();
+      await tester.enterText(nameField, 'legal-aid');
+      await tester.enterText(find.widgetWithText(TextField, 'Passphrase'), 'short');
+      await tester.tap(find.text('Join'));
+      await tester.pump();
+      expect(find.text('Use at least 8 characters'), findsOneWidget);
+
+      // An open one is joined at once and opened
+      await tester.tap(find.text('Private'));
+      await tester.pump();
+      await tester.tap(find.text('Join'));
+      await tester.pumpAndSettle();
+      expect(find.text('#legal-aid'), findsOneWidget);
+      expect(find.text('Nothing in #legal-aid yet'), findsOneWidget);
+
+      // And can be left again
+      await tester.tap(find.byTooltip('Channel options'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Leave channel'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Leave'));
+      await tester.pumpAndSettle();
+      expect(ApplicationAPI().channelStatus(ApplicationAPI.channelConversation('legal-aid')), isNull);
+      expect(find.text('#legal-aid'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+
+    for (final mode in [ThemeMode.light, ThemeMode.dark]) {
+      testWidgets('a channel lays out at 320px wide with 2x text in ${mode.name} mode', (tester) async {
+        await setScreen(tester, const Size(320, 640));
+        final api = ApplicationAPI()..stopPolling();
+        api.receiveFromNode(post('12D3KooWUiChanLong${mode.name}', 'cl-${mode.name}', 'A long post ' * 15, 'someone_long_name'));
+        await tester.pumpWidget(host(
+          ChatScreen(peerName: 'general', peerId: ApplicationAPI.channelConversation('general')),
+          mode: mode,
+          textScale: 2,
+        ));
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        await tester.pump(const Duration(seconds: 1));
+      });
+    }
+  });
+
   group('Startup', () {
     setUp(() => ApplicationAPI().stopPolling());
 

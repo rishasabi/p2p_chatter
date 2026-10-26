@@ -114,6 +114,16 @@ void main() {
       expect(relayed.msgId, 'abc');
       expect(relayed.handle, 'erin');
       expect(relayed.isRelayed, isTrue);
+      expect(relayed.room, isNull);
+
+      final post = ChatMessage.fromJson({
+        'id': 3,
+        'from': '12D3KooWPeer',
+        'content': 'to everyone',
+        'timestamp': '2026-10-13T12:00:00Z',
+        'room': 'general',
+      });
+      expect(post.room, 'general');
     });
 
     test('Receipt parses JSON correctly', () {
@@ -198,6 +208,28 @@ void main() {
       expect(peers.single.id, '12D3KooWHeardOf');
       expect(peers.single.addrs, ['/ip4/192.168.43.7/tcp/4001/p2p/12D3KooWHeardOf']);
       expect(peers.single.via, '12D3KooWNeighbour');
+      svc.dispose();
+    });
+
+    test('channels: posts go to the room, and joining returns the room\'s ID', () async {
+      final requests = <http.Request>[];
+      final client = MockClient((request) async {
+        requests.add(request);
+        final body = request.url.path == '/rooms'
+            ? {'name': 'legal-aid', 'room': '~0a1b2c', 'private': true}
+            : {'status': 'queued', 'room': 'general', 'id': 'p-1'};
+        return http.Response(jsonEncode(body), 200, headers: {'content-type': 'application/json'});
+      });
+      final svc = ChatterApiService(client: client);
+
+      expect(await svc.sendRoom('general', 'water at the gym', id: 'p-1'), 'queued');
+      expect(jsonDecode(requests.last.body), {'room': 'general', 'content': 'water at the gym', 'id': 'p-1'});
+
+      expect(await svc.joinRoom('legal-aid', passphrase: 'blue heron'), '~0a1b2c');
+      expect(jsonDecode(requests.last.body), {'name': 'legal-aid', 'passphrase': 'blue heron'});
+
+      await svc.leaveRoom('~0a1b2c');
+      expect(requests.last.method, 'DELETE');
       svc.dispose();
     });
 
@@ -352,6 +384,40 @@ void main() {
       api.receiveFromNode(fromNode(heard, 'pex-1', 'hi, I am on the same hotspot', handle: 'dana_pex'));
       expect(api.peers.map((p) => p['id']), contains(heard));
       expect(api.displayName(heard), 'dana_pex');
+    });
+
+    test('channel posts go to joined channels only, with their author kept apart from direct chats', () async {
+      final api = ApplicationAPI()..stopPolling();
+      const author = '12D3KooWChanAuthorPeer';
+      ChatMessage post(String id, String room, String content) => ChatMessage(
+          id: 0, from: author, content: content, timestamp: DateTime.now(), msgId: id, handle: 'medic_ana', room: room);
+
+      expect(api.channels.map((c) => c['name']), contains(ApplicationAPI.defaultChannel));
+      final general = ApplicationAPI.channelConversation('general');
+      api.receiveFromNode(post('ch-1', 'general', 'triage at tent 4'));
+      api.receiveFromNode(post('ch-2', 'not-joined', 'nobody here reads this'));
+
+      final m = api.historyFor(general).single;
+      expect(m['content'], 'triage at tent 4');
+      expect(m['author'], author);
+      expect(m['authorHandle'], 'medic_ana');
+      expect(api.channelStatus(general)!['unread'], 1);
+      expect(api.historyFor(ApplicationAPI.channelConversation('not-joined')), isEmpty);
+      expect(api.historyFor(author), isEmpty, reason: 'a channel post is not a direct message');
+
+      // Known by name (so impersonation checks work), but not a direct chat until they are one
+      expect(api.displayName(author), 'medic_ana');
+      expect(api.peers.map((p) => p['id']), isNot(contains(author)));
+      api.receiveFromNode(fromNode(author, 'ch-3', 'hi, it\'s Ana', handle: 'medic_ana'));
+      expect(api.peers.map((p) => p['id']), contains(author));
+
+      // Open channels are joined locally; names are checked
+      final shelter = await api.joinChannel('#Food-Shelter');
+      expect(shelter['id'], ApplicationAPI.channelConversation('food-shelter'));
+      expect(shelter['private'], isFalse);
+      await expectLater(api.joinChannel('food shelter'), throwsArgumentError);
+      await api.leaveChannel(shelter['id'] as String);
+      expect(api.channelStatus(shelter['id'] as String), isNull);
     });
 
     test('a local alias replaces the handle and peers cannot change it', () {

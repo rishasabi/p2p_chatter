@@ -138,6 +138,7 @@ class ApplicationAPI {
       }
     });
     if (seeded) _saveContacts();
+    await _loadChannels();
     await _loadHistory();
 
     final info = await getNode();
@@ -153,6 +154,8 @@ class ApplicationAPI {
       }
     }
     await _shareIdentity(info);
+    // Private channels first, so posts waiting for one can be resent
+    await _rejoinPrivateChannels();
     unawaited(_resendUndelivered());
 
     if (Platform.isAndroid) {
@@ -297,13 +300,19 @@ class ApplicationAPI {
       });
   }
 
+  /// Peers we've only heard of (from a neighbour, with no name yet) or only
+  /// seen posting in a channel, and haven't spoken to, named or verified.
   bool _isHearsayOnly(Map<String, dynamic> status) {
     final id = status['id'] as String;
-    return _contacts[id]?['learnedVia'] != null &&
-        status['online'] != true &&
-        handleOf(id) == null &&
-        aliasOf(id) == null &&
-        (_history[id]?.isEmpty ?? true);
+    final contact = _contacts[id];
+    if (contact == null ||
+        status['online'] == true ||
+        aliasOf(id) != null ||
+        isVerified(id) ||
+        (_history[id]?.isNotEmpty ?? false)) {
+      return false;
+    }
+    return (contact['learnedVia'] != null && handleOf(id) == null) || contact['seenInChannel'] == true;
   }
 
   /// Takes in the peers our neighbours told the node about: remembered with
@@ -333,11 +342,20 @@ class ApplicationAPI {
     return peers;
   }
 
-  void _rememberContact(String peerId, {String? handle, List<String>? addrs, String? learnedVia}) {
+  /// [learnedVia]: a neighbour told us about them. [inChannel]: they posted
+  /// in a channel. Anything else is first-hand (a link, a direct message, a
+  /// scanned code) and makes them a full contact.
+  void _rememberContact(String peerId,
+      {String? handle, List<String>? addrs, String? learnedVia, bool inChannel = false}) {
     if (peerId.isEmpty || peerId == _myPeerId) return;
     var changed = !_contacts.containsKey(peerId);
     final contact = _contactFor(peerId);
     if (changed && learnedVia != null) contact['learnedVia'] = learnedVia;
+    if (inChannel) {
+      if (changed) contact['seenInChannel'] = true;
+    } else if (learnedVia == null && contact.remove('seenInChannel') != null) {
+      changed = true;
+    }
     if (handle != null && handle.isNotEmpty && contact['handle'] != handle) {
       contact['handle'] = handle;
       _handleOwners.putIfAbsent(_handleKey(handle), () => peerId);
@@ -714,6 +732,135 @@ class ApplicationAPI {
     } catch (_) {}
   }
 
+  // ── Channels ────────────────────────────────────────────────────────────────
+
+  static final RegExp _channelNamePattern = RegExp(r'^[a-z0-9]+(-[a-z0-9]+)*$');
+  static const defaultChannel = 'general';
+  static const _channelPrefix = 'room:';
+
+  /// Joined channels, in the order joined: 'id' (what the node calls the
+  /// room: its name, or a private room's tag), 'name', 'private', and for a
+  /// private room the 'passphrase' its key is derived from (kept in the app's
+  /// private storage, so the room can be rejoined after a restart).
+  final List<Map<String, dynamic>> _channels = [
+    {'id': defaultChannel, 'name': defaultChannel, 'private': false},
+  ];
+
+  /// Returns why [name] can't name a channel, or null if it's fine.
+  static String? validateChannelName(String name) {
+    final n = name.trim();
+    if (n.isEmpty) return 'Give the channel a name';
+    if (n.length > 32) return 'Use at most 32 characters';
+    if (!_channelNamePattern.hasMatch(n)) return 'Lowercase letters, numbers and single dashes only';
+    return null;
+  }
+
+  /// Whether [conversationId] is a channel's (as opposed to a peer ID).
+  static bool isChannel(String conversationId) => conversationId.startsWith(_channelPrefix);
+
+  /// The conversation ID for channel [roomId], used for its history and draft.
+  static String channelConversation(String roomId) => '$_channelPrefix$roomId';
+
+  Map<String, dynamic>? _channelFor(String conversationId) => isChannel(conversationId)
+      ? _channels.where((c) => c['id'] == conversationId.substring(_channelPrefix.length)).firstOrNull
+      : null;
+
+  /// One joined channel for display: 'id' (its conversation ID), 'name',
+  /// 'private' and 'unread'; null if [conversationId] isn't a joined channel.
+  Map<String, dynamic>? channelStatus(String conversationId) {
+    final c = _channelFor(conversationId);
+    if (c == null) return null;
+    return {
+      'id': conversationId,
+      'name': c['name'],
+      'private': c['private'] == true,
+      'unread': unreadCount(conversationId),
+    };
+  }
+
+  /// Every joined channel, the default one first.
+  List<Map<String, dynamic>> get channels =>
+      [for (final c in _channels) channelStatus(channelConversation(c['id'] as String))!];
+
+  Future<void> _loadChannels() async {
+    final stored = await LocalStore.read('channels.json');
+    final list = stored['channels'];
+    if (list is! List) return; // never saved: just the default channel
+    _channels
+      ..clear()
+      ..addAll(list.whereType<Map>().map((c) => Map<String, dynamic>.from(c)));
+  }
+
+  void _saveChannels() => LocalStore.write('channels.json', {'channels': _channels});
+
+  /// The node forgets private rooms' keys when it stops; hand them back.
+  Future<void> _rejoinPrivateChannels() async {
+    for (final c in _channels.where((c) => c['private'] == true).toList()) {
+      try {
+        await _service.joinRoom(c['name'] as String, passphrase: c['passphrase'] as String?);
+      } catch (e) {
+        debugPrint('Could not rejoin #${c['name']}: $e');
+      }
+    }
+  }
+
+  /// Joins (or creates: it's the same thing) channel [name]. With a
+  /// [passphrase] it's private: only phones that join with the same name and
+  /// passphrase can read it, and relays see neither. Returns its status.
+  Future<Map<String, dynamic>> joinChannel(String name, {String? passphrase}) async {
+    final n = name.trim().replaceFirst(RegExp(r'^#'), '').toLowerCase();
+    final problem = validateChannelName(n);
+    if (problem != null) throw ArgumentError(problem);
+    final private = passphrase != null && passphrase.isNotEmpty;
+    // An open room needs nothing from the node, which relays and delivers
+    // every one; a private room's ID comes from the key the node derives
+    final id = private ? await _service.joinRoom(n, passphrase: passphrase) : n;
+    final conversation = channelConversation(id);
+    if (_channelFor(conversation) == null) {
+      _channels.add({'id': id, 'name': n, 'private': private, if (private) 'passphrase': passphrase});
+      _saveChannels();
+      _notifyHistory(conversation);
+    }
+    return channelStatus(conversation)!;
+  }
+
+  /// Leaves a channel. Its messages are still relayed for others; they're
+  /// just no longer shown here (or, for a private one, readable).
+  Future<void> leaveChannel(String conversationId) async {
+    final c = _channelFor(conversationId);
+    if (c == null) return;
+    _channels.remove(c);
+    _saveChannels();
+    _notifyHistory(conversationId);
+    if (c['private'] == true) {
+      try {
+        await _service.leaveRoom(c['id'] as String);
+      } catch (e) {
+        debugPrint('Could not tell the node we left #${c['name']}: $e');
+      }
+    }
+  }
+
+  void _receiveChannelPost(String id, ChatMessage msg, String room) {
+    final conversation = channelConversation(room);
+    if (_channelFor(conversation) == null) return; // not joined: relayed by the node, not shown
+    final handle = msg.handle != null && validateHandle(msg.handle!) == null ? msg.handle : null;
+    _rememberContact(msg.from, handle: handle, inChannel: true);
+    if (msg.isRelayed) _relayedSeen[msg.from] = DateTime.now();
+    _addMessage({
+      'id': id,
+      'peerId': conversation,
+      'author': msg.from,
+      if (handle != null) 'authorHandle': handle,
+      'content': msg.content,
+      'isOutgoing': false,
+      'timestamp': msg.timestamp,
+      'status': 'received',
+      'seen': false,
+      'readSent': true, // channels have no read receipts
+    });
+  }
+
   // ── Messages ────────────────────────────────────────────────────────────────
 
   Future<void> _loadHistory() async {
@@ -765,6 +912,11 @@ class ApplicationAPI {
   void _dispatchIncoming(ChatMessage msg) {
     final id = msg.msgId ?? 'node-${msg.id}-${msg.timestamp.millisecondsSinceEpoch}';
     if (_messageIndex.containsKey(id)) return; // already have it, e.g. refetched after a restart
+    final room = msg.room;
+    if (room != null) {
+      _receiveChannelPost(id, msg, room);
+      return;
+    }
     final handle = msg.handle;
     _rememberContact(msg.from, handle: handle != null && validateHandle(handle) == null ? handle : null);
     if (msg.isRelayed) _relayedSeen[msg.from] = DateTime.now();
@@ -832,6 +984,7 @@ class ApplicationAPI {
   /// Sends read receipts for seen messages the sender hasn't heard about yet;
   /// ones that can't be delivered now are retried later.
   Future<void> _sendPendingReadReceipts(String peerId) async {
+    if (isChannel(peerId)) return; // no receipts in channels
     final pending = (_history[peerId] ?? const <Map<String, dynamic>>[])
         .where((m) => m['isOutgoing'] != true && m['seen'] == true && m['readSent'] != true)
         .toList();
@@ -985,6 +1138,9 @@ class ApplicationAPI {
   /// the node keeps it and hands it on when someone is), then delivered and
   /// read as receipts come back; failed only if the node itself errors.
   /// Returns the status it reached.
+  ///
+  /// [peerId] may also be a channel's conversation ID: the message is then
+  /// posted to everyone in the channel, and goes no further than sent.
   Future<String> sendMessage(String msg, String peerId) async {
     final message = <String, dynamic>{
       'id': _uuid.v4(),
@@ -999,11 +1155,11 @@ class ApplicationAPI {
     _addMessage(message);
     try {
       // A direct Bluetooth link beats a relay when the peer is close by
-      if (!_wifiPeers.contains(peerId) && !_bluetoothPeers.containsKey(peerId)) {
+      if (!isChannel(peerId) && !_wifiPeers.contains(peerId) && !_bluetoothPeers.containsKey(peerId)) {
         await _linkBluetooth(peerId, scan: false);
       }
       if (Platform.isAndroid) await _syncBluetoothNeighbors();
-      final status = await _service.sendChat(peerId, msg, id: message['id'] as String);
+      final status = await _handToNode(message);
       _advanceStatus(message, status == 'queued' ? 'queued' : 'sent');
       return message['status'] as String;
     } catch (e) {
@@ -1027,12 +1183,24 @@ class ApplicationAPI {
       final waiting = const {'queued', 'sent', 'failed'}.contains(m['status']);
       if (m['isOutgoing'] != true || !waiting || (m['timestamp'] as DateTime).isBefore(cutoff)) continue;
       try {
-        final status = await _service.sendChat(m['peerId'] as String, m['content'] as String, id: m['id'] as String);
+        final status = await _handToNode(m);
         _advanceStatus(m, status == 'queued' ? 'queued' : 'sent');
       } catch (e) {
         debugPrint('Could not hand ${m['id']} to the node again: $e');
       }
     }
+  }
+
+  /// Gives one outgoing message to the node: for its peer, or posted to its
+  /// channel. Returns the node's status ('sent' or 'queued').
+  Future<String> _handToNode(Map<String, dynamic> m) {
+    final conversation = m['peerId'] as String;
+    final content = m['content'] as String;
+    final id = m['id'] as String;
+    if (!isChannel(conversation)) return _service.sendChat(conversation, content, id: id);
+    final channel = _channelFor(conversation);
+    if (channel == null) throw StateError('You left that channel');
+    return _service.sendRoom(channel['id'] as String, content, id: id);
   }
 
   /// Register callback for incoming messages

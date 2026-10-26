@@ -9,6 +9,8 @@ import 'local_store.dart';
 /// Messages are maps with: id, peerId, content, isOutgoing, timestamp
 /// (DateTime), status (sending | sent | delivered | read | failed | received),
 /// seen (we've viewed it) and readSent (the sender has been told we read it).
+/// In a channel, peerId is the channel's conversation ID (`room:<id>`) and
+/// incoming messages also carry author (peer ID) and authorHandle.
 class ChatStore {
   static final ChatStore _instance = ChatStore._();
   factory ChatStore() => _instance;
@@ -21,7 +23,7 @@ class ChatStore {
     if (LocalStore.isTestMode) return null;
     return _db ??= await openDatabase(
       p.join(await getDatabasesPath(), 'chatter.db'),
-      version: 1,
+      version: 2,
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE messages(
@@ -32,9 +34,18 @@ class ChatStore {
             ts INTEGER NOT NULL,
             status TEXT NOT NULL,
             seen INTEGER NOT NULL DEFAULT 0,
-            read_sent INTEGER NOT NULL DEFAULT 0
+            read_sent INTEGER NOT NULL DEFAULT 0,
+            author TEXT,
+            author_handle TEXT
           )''');
         await db.execute('CREATE INDEX messages_by_peer ON messages(peer_id, ts)');
+      },
+      // 2: channel messages record their author
+      onUpgrade: (db, from, _) async {
+        if (from < 2) {
+          await db.execute('ALTER TABLE messages ADD COLUMN author TEXT');
+          await db.execute('ALTER TABLE messages ADD COLUMN author_handle TEXT');
+        }
       },
     );
   }
@@ -74,6 +85,8 @@ class ChatStore {
         'status': m['status'] ?? 'received',
         'seen': m['seen'] == true ? 1 : 0,
         'read_sent': m['readSent'] == true ? 1 : 0,
+        'author': m['author'],
+        'author_handle': m['authorHandle'],
       };
 
   static Map<String, dynamic> _fromRow(Map<String, Object?> r) => {
@@ -85,5 +98,7 @@ class ChatStore {
         'status': r['status'],
         'seen': r['seen'] == 1,
         'readSent': r['read_sent'] == 1,
+        if (r['author'] != null) 'author': r['author'],
+        if (r['author_handle'] != null) 'authorHandle': r['author_handle'],
       };
 }

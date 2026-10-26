@@ -9,6 +9,7 @@ import '../widgets/peer_display.dart';
 import '../widgets/peer_identity.dart';
 import '../widgets/time_format.dart';
 import 'chat_screen.dart';
+import 'join_channel_dialog.dart';
 import 'wifi_qr_screen.dart';
 
 class MeshScreen extends StatefulWidget {
@@ -25,6 +26,8 @@ class _MeshScreenState extends State<MeshScreen> {
   List<Map<String, dynamic>> filteredPeers = [];
   final TextEditingController _searchController = TextEditingController();
   bool _isLoading = true;
+  // Direct messages, or mesh channels
+  bool _showChannels = false;
 
   @override
   void initState() {
@@ -165,7 +168,21 @@ class _MeshScreenState extends State<MeshScreen> {
                 ),
               ),
             ),
-            if (peers.isNotEmpty)
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: SegmentedButton<bool>(
+                  showSelectedIcon: false,
+                  segments: [
+                    ButtonSegment(value: false, icon: const Icon(Icons.person_outline), label: Text(_tabLabel('Direct', false))),
+                    ButtonSegment(value: true, icon: const Icon(Icons.tag), label: Text(_tabLabel('Channels', true))),
+                  ],
+                  selected: {_showChannels},
+                  onSelectionChanged: (s) => setState(() => _showChannels = s.first),
+                ),
+              ),
+            ),
+            if (peers.isNotEmpty || _showChannels)
               SliverToBoxAdapter(
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -173,7 +190,7 @@ class _MeshScreenState extends State<MeshScreen> {
                     controller: _searchController,
                     textInputAction: TextInputAction.search,
                     decoration: InputDecoration(
-                      hintText: 'Search by name or peer ID',
+                      hintText: _showChannels ? 'Search channels' : 'Search by name or peer ID',
                       prefixIcon: const Icon(Icons.search),
                       suffixIcon: _searchController.text.isEmpty
                           ? null
@@ -201,7 +218,70 @@ class _MeshScreenState extends State<MeshScreen> {
     );
   }
 
+  /// A segment's label, with how many messages in it are unread.
+  String _tabLabel(String label, bool channels) {
+    final unread = channels
+        ? api.channels.fold<int>(0, (n, c) => n + (c['unread'] as int))
+        : peers.fold<int>(0, (n, p) => n + (p['unread'] as int? ?? 0));
+    return unread > 0 ? '$label · $unread' : label;
+  }
+
+  void _openChannel(Map<String, dynamic> channel) {
+    FocusScope.of(context).unfocus();
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => ChatScreen(peerName: channel['name'] as String, peerId: channel['id'] as String)),
+    );
+  }
+
+  List<Widget> _buildChannels() {
+    final query = _searchController.text.toLowerCase().trim().replaceFirst(RegExp(r'^#'), '');
+    final shown = api.channels.where((c) => (c['name'] as String).contains(query)).toList();
+    return [
+      SliverToBoxAdapter(
+        child: ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 4),
+          leading: const ChannelAvatar(private: false, size: 52),
+          title: const Text('Join or create a channel'),
+          subtitle: const Text('Open to everyone in range, or private with a passphrase'),
+          trailing: const Icon(Icons.add),
+          onTap: () => showJoinChannelDialog(context),
+        ),
+      ),
+      if (shown.isEmpty)
+        SliverToBoxAdapter(
+          child: StateMessage(
+            fill: false,
+            icon: Icons.search_off,
+            title: query.isEmpty ? 'You haven\'t joined any channels' : 'No channel matches "#$query"',
+            body: query.isEmpty ? null : 'You can join it: channels are made by posting to them.',
+          ),
+        )
+      else
+        SliverList.separated(
+          itemCount: shown.length,
+          separatorBuilder: (_, __) => const Divider(indent: 86, endIndent: 20),
+          itemBuilder: (context, index) {
+            final channel = shown[index];
+            final id = channel['id'] as String;
+            final history = api.historyFor(id);
+            final last = history.isEmpty ? null : history.last;
+            final author = last?['author'] as String?;
+            return _ChannelRow(
+              key: ValueKey(id),
+              channel: channel,
+              lastMessage: last,
+              lastAuthor: author != null ? api.displayName(author) : null,
+              draft: _drafts.getDraft(id),
+              onTap: () => _openChannel(channel),
+            );
+          },
+        ),
+    ];
+  }
+
   List<Widget> _buildBody() {
+    if (_showChannels) return _buildChannels();
     if (_isLoading && peers.isEmpty) {
       return const [
         SliverToBoxAdapter(
@@ -259,6 +339,121 @@ class _MeshScreenState extends State<MeshScreen> {
   }
 }
 
+/// The latest message as a one-line preview, saying who wrote it when it's
+/// ours or ([from]) someone's in a channel.
+String _previewOf(Map<String, dynamic> last, {String? from}) {
+  final content = markdownToPlain(last['content'] as String? ?? '');
+  if (last['isOutgoing'] == true) {
+    return switch (last['status']) {
+      'failed' => 'Not delivered: $content',
+      'queued' => 'Waiting to send: $content',
+      _ => 'You: $content',
+    };
+  }
+  return from != null ? '$from: $content' : content;
+}
+
+/// One channel in the list: its name, the latest post and who wrote it, and
+/// how many are unread.
+class _ChannelRow extends StatelessWidget {
+  final Map<String, dynamic> channel;
+  final Map<String, dynamic>? lastMessage;
+  final String? lastAuthor;
+  final String draft;
+  final VoidCallback onTap;
+
+  const _ChannelRow({
+    super.key,
+    required this.channel,
+    required this.lastMessage,
+    required this.lastAuthor,
+    required this.draft,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final name = '#${channel['name']}';
+    final private = channel['private'] == true;
+    final unread = channel['unread'] as int? ?? 0;
+    final last = lastMessage;
+    final preview = last == null
+        ? (private ? 'Private channel' : 'Open channel')
+        : _previewOf(last, from: lastAuthor);
+    final time = last == null ? null : formatListTime(context, last['timestamp'] as DateTime);
+
+    final label = [
+      '$name channel',
+      if (private) 'private',
+      if (unread > 0) '$unread unread',
+      if (draft.isNotEmpty) 'draft: ${draft.replaceAll('\n', ' ')}'
+      else if (last != null) 'last message $time: $preview',
+    ].join(', ');
+
+    return Semantics(
+      button: true,
+      label: label,
+      excludeSemantics: true,
+      onTap: onTap,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+          child: Row(
+            children: [
+              ChannelAvatar(private: private, size: 52),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.baseline,
+                      textBaseline: TextBaseline.alphabetic,
+                      children: [
+                        Expanded(
+                          child: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleMedium),
+                        ),
+                        if (time != null) ...[
+                          const SizedBox(width: 8),
+                          Text(
+                            time,
+                            style: theme.textTheme.bodySmall!.copyWith(
+                              color: unread > 0 ? cs.primary : cs.onSurfaceVariant,
+                              fontWeight: unread > 0 ? FontWeight.w600 : null,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Row(
+                      children: [
+                        Expanded(child: _PreviewLine(text: preview, draft: draft, emphasised: unread > 0)),
+                        if (unread > 0) ...[
+                          const SizedBox(width: 8),
+                          Badge(
+                            label: Text(unread > 99 ? '99+' : '$unread'),
+                            largeSize: 22,
+                            padding: const EdgeInsets.symmetric(horizontal: 7),
+                            textStyle: theme.textTheme.labelMedium,
+                          ),
+                        ],
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// One conversation in the list: who, how they're reachable, the latest
 /// message and how many are unread.
 class _PeerRow extends StatelessWidget {
@@ -287,19 +482,7 @@ class _PeerRow extends StatelessWidget {
     final unread = peer['unread'] as int? ?? 0;
     final last = lastMessage;
 
-    final String preview;
-    if (last == null) {
-      preview = reachSentence(peer);
-    } else {
-      final content = markdownToPlain(last['content'] as String? ?? '');
-      preview = last['isOutgoing'] == true
-          ? switch (last['status']) {
-              'failed' => 'Not delivered: $content',
-              'queued' => 'Waiting to send: $content',
-              _ => 'You: $content',
-            }
-          : content;
-    }
+    final preview = last == null ? reachSentence(peer) : _previewOf(last);
     final time = last == null ? null : formatListTime(context, last['timestamp'] as DateTime);
 
     final verified = peer['verified'] == true;
