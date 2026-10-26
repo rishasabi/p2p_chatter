@@ -124,8 +124,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     });
   }
 
+  /// The draft as it should go out: trailing whitespace and leading blank
+  /// lines dropped; line breaks and indentation inside it kept.
+  static String _outgoingText(String draft) => draft.trimRight().replaceFirst(RegExp(r'^\s*\n'), '');
+
   Future<void> _handleSend() async {
-    final text = _msgController.text.trim();
+    final text = _outgoingText(_msgController.text);
     if (text.isEmpty || _isSending) return;
 
     _msgController.clear();
@@ -527,8 +531,10 @@ class _Composer extends StatelessWidget {
                   controller: controller,
                   minLines: 1,
                   maxLines: 6,
+                  // Enter starts a new line (lists, addresses, triage notes);
+                  // only the Send button sends
                   keyboardType: TextInputType.multiline,
-                  textInputAction: TextInputAction.send,
+                  textInputAction: TextInputAction.newline,
                   textCapitalization: TextCapitalization.sentences,
                   decoration: InputDecoration(
                     hintText: 'Message $peerName',
@@ -539,9 +545,6 @@ class _Composer extends StatelessWidget {
                         OutlineInputBorder(borderRadius: pill, borderSide: BorderSide(color: cs.outlineVariant)),
                     focusedBorder: OutlineInputBorder(borderRadius: pill, borderSide: BorderSide(color: cs.primary, width: 2)),
                   ),
-                  onSubmitted: (_) => onSend(),
-                  // Keep the keyboard up between messages
-                  onEditingComplete: () {},
                 ),
               ),
               const SizedBox(width: 8),

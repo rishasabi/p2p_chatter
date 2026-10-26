@@ -132,26 +132,35 @@ void main() {
       await tester.pump(const Duration(seconds: 1)); // contact save timer
     });
 
-    testWidgets('send button follows the draft and the keyboard stays up after sending', (tester) async {
+    testWidgets('Enter starts a new line, only the Send button sends, and the keyboard stays up', (tester) async {
       await setScreen(tester, const Size(390, 800));
       await tester.pumpWidget(host(const ChatScreen(peerName: 'nobody', peerId: '12D3KooWUiEmptyPeer')));
       await tester.pump();
 
       // An unknown peer goes by its ID, not the name we were handed
       expect(find.textContaining('Start your conversation with'), findsOneWidget);
-      IconButton send() => tester.widget<IconButton>(find.widgetWithIcon(IconButton, Icons.arrow_upward));
+      final sendButton = find.widgetWithIcon(IconButton, Icons.arrow_upward);
+      IconButton send() => tester.widget<IconButton>(sendButton);
+      TextField field() => tester.widget<TextField>(find.byType(TextField));
       expect(send().onPressed, isNull);
+      expect(field().textInputAction, TextInputAction.newline);
 
-      await tester.enterText(find.byType(TextField), 'hi');
+      await tester.enterText(find.byType(TextField), '\nShelter B\n  - water\n  - blankets  \n\n');
       await tester.pump();
       expect(send().onPressed, isNotNull);
 
-      await tester.testTextInput.receiveAction(TextInputAction.send);
+      // The keyboard's Enter key doesn't send
+      await tester.testTextInput.receiveAction(TextInputAction.newline);
+      await tester.pump();
+      expect(find.textContaining('Start your conversation with'), findsOneWidget);
+      expect(field().controller!.text, isNotEmpty);
+
+      await tester.tap(sendButton);
       await tester.pump();
       await tester.pump(const Duration(seconds: 1));
-      expect(find.text('hi'), findsOneWidget); // the message, now in the thread
-      final field = tester.widget<TextField>(find.byType(TextField));
-      expect(field.controller!.text, isEmpty);
+      // Sent with its line breaks and indents, minus the blank edges
+      expect(find.text('Shelter B\n  - water\n  - blankets'), findsOneWidget);
+      expect(field().controller!.text, isEmpty);
       expect(tester.testTextInput.isVisible, isTrue);
       await tester.pump(const Duration(seconds: 5)); // let the failure notice time out
     });
