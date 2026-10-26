@@ -168,6 +168,33 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
               ],
             ),
           ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Chat layout style', style: theme.textTheme.bodyLarge),
+                const SizedBox(height: 4),
+                Text(
+                  'Bubbles either side, or a left-aligned stream that fits more on screen',
+                  style: theme.textTheme.bodyMedium!.copyWith(color: cs.onSurfaceVariant),
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: SegmentedButton<ChatViewMode>(
+                    showSelectedIcon: false,
+                    segments: const [
+                      ButtonSegment(value: ChatViewMode.bubbles, icon: Icon(Icons.chat_bubble_outline), label: Text('Bubbles')),
+                      ButtonSegment(value: ChatViewMode.stream, icon: Icon(Icons.view_agenda_outlined), label: Text('Stream')),
+                    ],
+                    selected: {ref.watch(chatViewModeProvider)},
+                    onSelectionChanged: (s) => ref.read(chatViewModeProvider.notifier).set(s.first),
+                  ),
+                ),
+              ],
+            ),
+          ),
           ListTile(
             leading: const Icon(Icons.palette_outlined),
             title: const Text('Customize theme'),

@@ -1,5 +1,10 @@
 import 'local_store.dart';
 
+/// How a conversation is laid out: speech bubbles either side (the
+/// default), or a left-aligned stream with author headers, denser for busy
+/// channels and coordination.
+enum ChatViewMode { bubbles, stream }
+
 /// User settings, persisted in settings.json. [load] once at startup; reads
 /// are synchronous after that.
 class SettingsStore {
@@ -12,6 +17,7 @@ class SettingsStore {
   static const backgroundSync = 'backgroundSync';
   static const publishToDht = 'publishToDht';
   static const linkPreviews = 'linkPreviews';
+  static const chatViewMode = 'chatViewMode';
 
   Map<String, dynamic> _values = {};
 

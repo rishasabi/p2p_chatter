@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../application_api.dart';
+import '../providers/theme_provider.dart';
 import '../services/api_service.dart';
 import '../services/draft_store.dart';
 import '../services/link_preview_service.dart';
+import '../services/settings_store.dart';
 import '../theme/app_theme.dart';
 import '../widgets/feedback.dart';
 import '../widgets/link_preview_card.dart';
@@ -16,7 +19,7 @@ import 'delete_conversation_dialog.dart';
 
 /// A conversation: with one peer, or in a channel when [peerId] is a
 /// channel's conversation ID (see [ApplicationAPI.channelConversation]).
-class ChatScreen extends StatefulWidget {
+class ChatScreen extends ConsumerStatefulWidget {
   final String peerName;
   final String peerId;
 
@@ -30,10 +33,10 @@ class ChatScreen extends StatefulWidget {
   });
 
   @override
-  State<ChatScreen> createState() => _ChatScreenState();
+  ConsumerState<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
+class _ChatScreenState extends ConsumerState<ChatScreen> with WidgetsBindingObserver {
   final TextEditingController _msgController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final ApplicationAPI api = ApplicationAPI();
@@ -143,6 +146,22 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _isChannel ? '#${_channel?['name'] ?? widget.peerName}' : _status['name'] as String? ?? widget.peerName;
 
   bool get _isPrivateChannel => _channel?['private'] == true;
+
+  /// Switches every conversation between bubbles and the stream layout.
+  PopupMenuItem<void> _layoutSwitchItem() {
+    final toStream = ref.read(chatViewModeProvider) == ChatViewMode.bubbles;
+    return PopupMenuItem(
+      onTap: () => ref.read(chatViewModeProvider.notifier).set(toStream ? ChatViewMode.stream : ChatViewMode.bubbles),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(toStream ? Icons.view_agenda_outlined : Icons.chat_bubble_outline),
+          const SizedBox(width: 12),
+          Text(toStream ? 'Stream layout' : 'Bubble layout'),
+        ],
+      ),
+    );
+  }
 
   /// Deletes this chat, or leaves and deletes this channel, once confirmed.
   Future<void> _deleteConversation() async {
@@ -291,6 +310,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           PopupMenuButton<void>(
             tooltip: 'Chat options',
             itemBuilder: (_) => [
+              _layoutSwitchItem(),
               PopupMenuItem(onTap: _deleteConversation, child: const DangerMenuLabel(Icons.delete_outline, 'Delete chat')),
             ],
           ),
@@ -355,6 +375,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         PopupMenuButton<void>(
           tooltip: 'Channel options',
           itemBuilder: (_) => [
+            _layoutSwitchItem(),
             PopupMenuItem(
               onTap: _deleteConversation,
               child: const DangerMenuLabel(Icons.logout, 'Leave & delete channel'),
@@ -388,7 +409,59 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
+  /// Message [i] in the stream layout: you, the peer, or a channel post's
+  /// author heads each burst.
+  Widget _buildStreamEntry(int i, String? newestOutgoingId, {required bool startsBurst}) {
+    final m = _messages[i];
+    final brightness = Theme.of(context).brightness;
+    final isOut = m['isOutgoing'] == true;
+    final author = m['author'] as String?;
+    final String id, name;
+    final bool verified;
+    String? warning;
+    VoidCallback? onTap;
+    Color tint;
+    if (isOut) {
+      id = api.myPeerId ?? 'me';
+      name = api.myHandle != null ? '@${api.myHandle}' : 'You';
+      verified = false;
+      tint = Theme.of(context).colorScheme.primary;
+    } else if (author != null) {
+      id = author;
+      name = api.authorLabel(author);
+      verified = api.isVerified(author);
+      if (!verified && api.hasHandleConflict(author)) {
+        warning = 'Impersonation warning';
+      } else if (!verified && api.handleShared(author)) {
+        warning = 'Another device uses this handle';
+      }
+      onTap = () => showPeerIdentitySheet(context, author);
+      tint = peerTint(author, brightness);
+    } else {
+      id = widget.peerId;
+      name = _peerName;
+      verified = _status['verified'] == true;
+      if (!verified && _status['handleConflict'] == true) warning = 'Impersonation warning';
+      onTap = _showIdentity;
+      tint = peerTint(widget.peerId, brightness);
+    }
+    return _StreamMessage(
+      key: ValueKey(m['id']),
+      message: m,
+      authorId: id,
+      authorName: name,
+      nameColor: tint,
+      startsBurst: startsBurst,
+      verified: verified,
+      warning: warning,
+      showStatusWord: m['id'] == newestOutgoingId,
+      onCopy: () => _copyMessage(m['content'] as String? ?? ''),
+      onAuthorTap: onTap,
+    );
+  }
+
   Widget _buildThread() {
+    final stream = ref.watch(chatViewModeProvider) == ChatViewMode.stream;
     // Chronological entries: a day heading before each new day's first message
     final entries = <Object>[];
     String? newestOutgoingId;
@@ -432,6 +505,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 final i = entry as int;
                 final m = _messages[i];
                 final author = m['author'] as String?;
+                if (stream) return _buildStreamEntry(i, newestOutgoingId, startsBurst: !continuesGroup(i, i - 1));
                 return _MessageBubble(
                   key: ValueKey(m['id']),
                   message: m,
@@ -481,6 +555,172 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 }
 
 // ── Sub-widgets ───────────────────────────────────────────────────────────────
+
+/// One message in the stream layout: everything left-aligned under its
+/// author's node and name, the way busy channels read best. A burst from
+/// one person within three minutes shares a single header.
+class _StreamMessage extends StatelessWidget {
+  final Map<String, dynamic> message;
+  final String authorId;
+  final String authorName;
+
+  /// The author's name colour: their node's tint, or the primary colour for you.
+  final Color nameColor;
+  final bool startsBurst;
+  final bool verified;
+
+  /// What the amber mark after the name says, or null for none.
+  final String? warning;
+  final bool showStatusWord;
+  final VoidCallback onCopy;
+  final VoidCallback? onAuthorTap;
+
+  const _StreamMessage({
+    super.key,
+    required this.message,
+    required this.authorId,
+    required this.authorName,
+    required this.nameColor,
+    required this.startsBurst,
+    required this.verified,
+    required this.warning,
+    required this.showStatusWord,
+    required this.onCopy,
+    this.onAuthorTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final isOut = message['isOutgoing'] == true;
+    final failed = isOut && message['status'] == 'failed';
+    final content = message['content'] as String? ?? '';
+    final timeStr = formatClock(context, message['timestamp'] as DateTime);
+    final delivery = _deliveryOf(message['status'] as String?);
+    final link = firstWebLink(content);
+    final muted = cs.onSurfaceVariant;
+    final statusText = isOut ? (showStatusWord || failed ? delivery.word : null) : null;
+    const avatarSize = 36.0;
+
+    final semanticLabel = [
+      authorName,
+      if (verified) 'verified contact',
+      if (!verified && warning != null) warning!,
+      timeStr,
+      if (isOut) delivery.word,
+      content,
+      if (link != null) 'link to ${link.host}',
+    ].join(', ');
+
+    return Semantics(
+      label: semanticLabel,
+      onLongPressHint: 'Copy message',
+      onLongPress: onCopy,
+      customSemanticsActions: {
+        if (onAuthorTap != null) const CustomSemanticsAction(label: 'Show who wrote it'): onAuthorTap!,
+        if (link != null)
+          CustomSemanticsAction(label: 'Open link to ${link.host}'): () =>
+              openLinkWithConsent(context, link.url.toString(), text: link.text),
+      },
+      excludeSemantics: true,
+      child: InkWell(
+        onLongPress: onCopy,
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(4, startsBurst ? 12 : 2, 4, 2),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                width: avatarSize,
+                child: startsBurst
+                    ? GestureDetector(
+                        onTap: onAuthorTap,
+                        child: PeerAvatar(peerId: authorId, name: authorName.replaceFirst('@', ''), size: avatarSize),
+                      )
+                    : null,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (startsBurst)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 2),
+                        child: Wrap(
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            GestureDetector(
+                              onTap: onAuthorTap,
+                              child: Text(
+                                authorName,
+                                style: theme.textTheme.labelLarge!.copyWith(color: nameColor, fontWeight: FontWeight.w700),
+                              ),
+                            ),
+                            if (verified || warning != null)
+                              Padding(
+                                padding: const EdgeInsets.only(left: 4),
+                                child: TrustMark(
+                                  verified: verified,
+                                  conflict: warning != null,
+                                  conflictLabel: warning ?? 'Impersonation warning',
+                                  size: 16,
+                                ),
+                              ),
+                            Padding(
+                              padding: const EdgeInsets.only(left: 8),
+                              child: Text(timeStr, style: theme.textTheme.bodySmall!.copyWith(color: muted)),
+                            ),
+                          ],
+                        ),
+                      ),
+                    MessageText(content, style: theme.textTheme.bodyLarge!.copyWith(color: cs.onSurface)),
+                    if (link != null) ...[
+                      const SizedBox(height: 6),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 480),
+                        child: LinkPreviewCard(link: link, foreground: cs.onSurface),
+                      ),
+                    ],
+                    // Our messages carry their delivery state, as in bubbles
+                    if (isOut)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              delivery.icon,
+                              size: MediaQuery.textScalerOf(context).scale(14),
+                              color: failed ? cs.error : muted,
+                            ),
+                            if (statusText != null) ...[
+                              const SizedBox(width: 4),
+                              Flexible(
+                                child: Text(
+                                  statusText,
+                                  style: theme.textTheme.bodySmall!.copyWith(
+                                    color: failed ? cs.error : muted,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 class _DayHeading extends StatelessWidget {
   final DateTime time;

@@ -35,6 +35,22 @@ final themeProvider = StateNotifierProvider<ThemeNotifier, ThemeMode>((ref) {
   return ThemeNotifier();
 });
 
+class ChatViewModeNotifier extends StateNotifier<ChatViewMode> {
+  ChatViewModeNotifier()
+      : super(SettingsStore().getString(SettingsStore.chatViewMode) == ChatViewMode.stream.name
+            ? ChatViewMode.stream
+            : ChatViewMode.bubbles);
+
+  void set(ChatViewMode mode) {
+    state = mode;
+    SettingsStore().set(SettingsStore.chatViewMode, mode.name);
+  }
+}
+
+final chatViewModeProvider = StateNotifierProvider<ChatViewModeNotifier, ChatViewMode>((ref) {
+  return ChatViewModeNotifier();
+});
+
 /// A custom palette, used in place of the light and dark themes while on.
 class CustomThemeNotifier extends StateNotifier<CustomThemeSettings> {
   CustomThemeNotifier() : super(CustomThemeStore().settings);

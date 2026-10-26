@@ -27,6 +27,19 @@ String reachSentence(Map<String, dynamic> status) {
 String compactPeerId(String id) =>
     id.length > 26 ? '${id.substring(0, 12)}…${id.substring(id.length - 6)}' : id;
 
+// Ember means "you", so peers never get an amber hue
+const _hues = [200.0, 152.0, 265.0, 340.0, 185.0, 300.0, 120.0];
+
+double _peerHue(String peerId) =>
+    _hues[peerId.codeUnits.fold<int>(0, (a, b) => (a * 31 + b) & 0x7fffffff) % _hues.length];
+
+/// The colour of [peerId]'s initial on their node, which also reads as text
+/// on the background: their name in the stream layout.
+Color peerTint(String peerId, Brightness brightness) => (brightness == Brightness.dark
+        ? HSLColor.fromAHSL(1, _peerHue(peerId), 0.70, 0.88)
+        : HSLColor.fromAHSL(1, _peerHue(peerId), 0.60, 0.22))
+    .toColor();
+
 /// Paints one person as a mesh node: a disc tinted from their peer ID (the
 /// same person always gets the same colour) carrying their initial, and a
 /// ring round it while they're reachable. Shared by [PeerAvatar] and the
@@ -42,12 +55,10 @@ void paintPeerNode(
   required Color ring,
   bool faded = false,
 }) {
-  // Ember means "you", so peers never get an amber hue
-  const hues = [200.0, 152.0, 265.0, 340.0, 185.0, 300.0, 120.0];
-  final hue = hues[peerId.codeUnits.fold<int>(0, (a, b) => (a * 31 + b) & 0x7fffffff) % hues.length];
+  final hue = _peerHue(peerId);
   final dark = brightness == Brightness.dark;
   var bg = (dark ? HSLColor.fromAHSL(1, hue, 0.34, 0.32) : HSLColor.fromAHSL(1, hue, 0.55, 0.85)).toColor();
-  var fg = (dark ? HSLColor.fromAHSL(1, hue, 0.70, 0.88) : HSLColor.fromAHSL(1, hue, 0.60, 0.22)).toColor();
+  var fg = peerTint(peerId, brightness);
   if (faded) {
     bg = bg.withValues(alpha: 0.45);
     fg = fg.withValues(alpha: 0.7);

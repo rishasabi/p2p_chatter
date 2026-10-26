@@ -815,6 +815,105 @@ void main() {
     }
   });
 
+  group('Stream layout', () {
+    setUp(() => ApplicationAPI().stopPolling());
+    tearDown(() => SettingsStore().set(SettingsStore.chatViewMode, ChatViewMode.bubbles.name));
+
+    testWidgets('switches from the chat menu, groups bursts under one header, and is remembered', (tester) async {
+      await setScreen(tester, const Size(390, 900));
+      final api = ApplicationAPI()..stopPolling();
+      const peer = '12D3KooWUiStreamPeer';
+      final start = DateTime.now().subtract(const Duration(minutes: 30));
+      api.receiveFromNode(incoming(peer, 'st-1', 'convoy leaving', start, handle: 'stream_lead'));
+      api.receiveFromNode(incoming(peer, 'st-2', 'two trucks', start.add(const Duration(minutes: 1)), handle: 'stream_lead'));
+      api.receiveFromNode(incoming(peer, 'st-3', 'arrived', start.add(const Duration(minutes: 10)), handle: 'stream_lead'));
+      api.debugAddMessage({
+        'id': 'st-4', 'peerId': peer, 'content': 'thanks', 'isOutgoing': true,
+        'timestamp': start.add(const Duration(minutes: 11)), 'status': 'delivered',
+      });
+
+      await tester.pumpWidget(host(const ChatScreen(peerName: 'stream_lead', peerId: peer)));
+      await tester.pump();
+      await tester.tap(find.byTooltip('Chat options'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Stream layout'));
+      await tester.pumpAndSettle();
+
+      // A header for the first burst and again after the ten-minute gap; ours too
+      expect(find.text('stream_lead'), findsNWidgets(3)); // two headers and the top bar
+      expect(find.text('You'), findsOneWidget);
+      expect(find.text('Delivered'), findsOneWidget);
+      // Everything starts at the same left edge, ours included
+      final left = tester.getTopLeft(find.text('convoy leaving')).dx;
+      expect(tester.getTopLeft(find.text('two trucks')).dx, left);
+      expect(tester.getTopLeft(find.text('thanks')).dx, left);
+      expect(SettingsStore().getString(SettingsStore.chatViewMode), 'stream');
+
+      // A new screen (or a restart) opens in the same layout
+      await tester.pumpWidget(host(const ChatScreen(peerName: 'stream_lead', peerId: peer)));
+      await tester.pump();
+      expect(tester.getTopLeft(find.text('thanks')).dx, left);
+      await tester.tap(find.byTooltip('Chat options'));
+      await tester.pumpAndSettle();
+      expect(find.text('Bubble layout'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(seconds: 1));
+    });
+
+    testWidgets('a channel in the stream flags authors who share a handle', (tester) async {
+      await setScreen(tester, const Size(390, 900));
+      SettingsStore().set(SettingsStore.chatViewMode, ChatViewMode.stream.name);
+      final api = ApplicationAPI()..stopPolling();
+      await api.joinChannel('stream-room');
+      const real = '12D3KooWUiStreamRealAa1', copy = '12D3KooWUiStreamCopyBb2';
+      ChatMessage post(String from, String id, String text, String handle) => ChatMessage(
+          id: 0, from: from, content: text, timestamp: DateTime.now(), msgId: id, handle: handle, room: 'stream-room');
+      api.receiveFromNode(post(real, 'sr-1', 'water at gate 2', 'gate_lead'));
+      api.receiveFromNode(post(copy, 'sr-2', 'gate 2 closed, go home', 'Gate-Lead'));
+
+      await tester.pumpWidget(host(const ChatScreen(peerName: 'stream-room', peerId: 'room:stream-room')));
+      await tester.pump();
+      expect(find.text('@gate_lead (#lAa1)'), findsOneWidget);
+      expect(find.text('@Gate-Lead (#yBb2)'), findsOneWidget);
+      expect(find.byIcon(Icons.warning_amber_rounded), findsNWidgets(2));
+      expect(find.bySemanticsLabel(RegExp(r'^@Gate-Lead .*, Impersonation warning,')), findsOneWidget);
+
+      await tester.tap(find.text('@gate_lead (#lAa1)'));
+      await tester.pumpAndSettle();
+      expect(find.text(real), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(seconds: 1));
+    });
+
+    testWidgets('the layout is chosen in Settings', (tester) async {
+      await setScreen(tester, const Size(390, 900));
+      await tester.pumpWidget(host(const NodeSettingsScreen()));
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.scrollUntilVisible(find.text('Stream'), 200);
+      await tester.tap(find.text('Stream'));
+      await tester.pump();
+      expect(SettingsStore().getString(SettingsStore.chatViewMode), 'stream');
+      await tester.tap(find.text('Bubbles'));
+      await tester.pump();
+      expect(SettingsStore().getString(SettingsStore.chatViewMode), 'bubbles');
+    });
+
+    for (final mode in [ThemeMode.light, ThemeMode.dark]) {
+      testWidgets('lays out at 320px wide with 2x text in ${mode.name} mode', (tester) async {
+        await setScreen(tester, const Size(320, 640));
+        SettingsStore().set(SettingsStore.chatViewMode, ChatViewMode.stream.name);
+        final api = ApplicationAPI()..stopPolling();
+        const peer = '12D3KooWUiStreamNarrow';
+        api.receiveFromNode(incoming(peer, 'sn-${mode.name}', '**Triage:** tent 4 is full, send new arrivals to the '
+            'school gym https://relief.example/map', DateTime.now(), handle: 'a_rather_long_handle_here'));
+        await tester.pumpWidget(host(const ChatScreen(peerName: 'a_rather_long_handle_here', peerId: peer), mode: mode, textScale: 2));
+        await tester.pump();
+        expect(tester.takeException(), isNull);
+        await tester.pump(const Duration(seconds: 1));
+      });
+    }
+  });
+
   group('Chats list', () {
     setUp(() => ApplicationAPI().stopPolling());
 
