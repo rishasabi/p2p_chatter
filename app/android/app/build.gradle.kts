@@ -36,6 +36,14 @@ android {
             signingConfig = signingConfigs.getByName("debug")
         }
     }
+
+    // Compressed, the native libraries (libchatter.so alone is 27 MB) take half
+    // the space in the APK; Android unpacks them at install.
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
 }
 
 flutter {
