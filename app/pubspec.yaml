@@ -34,6 +34,9 @@ dependencies:
 
   # --- HTTP Client for Go backend ---
   http: ^1.2.1
+  flutter_markdown_plus: ^1.0.12
+  markdown: ^7.3.1
+  url_launcher: ^6.3.3
 
 dev_dependencies:
   flutter_test:

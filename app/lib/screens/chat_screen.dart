@@ -5,6 +5,7 @@ import '../services/api_service.dart';
 import '../services/draft_store.dart';
 import '../theme/app_theme.dart';
 import '../widgets/feedback.dart';
+import '../widgets/message_text.dart';
 import '../widgets/peer_display.dart';
 import '../widgets/peer_identity.dart';
 import '../widgets/time_format.dart';
@@ -506,7 +507,7 @@ class _MessageBubble extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(content, style: theme.textTheme.bodyLarge!.copyWith(color: fg)),
+                        MessageText(content, style: theme.textTheme.bodyLarge!.copyWith(color: fg)),
                         if (showMeta) ...[
                           const SizedBox(height: 4),
                           // Gaps are padding, not Wrap.spacing: Wrap leaves spacing

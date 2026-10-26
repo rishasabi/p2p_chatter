@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
@@ -22,6 +23,7 @@ import 'package:app/services/embedded_node_service.dart';
 import 'package:app/services/local_store.dart';
 import 'package:app/theme/app_theme.dart';
 import 'package:app/widgets/mesh_map.dart';
+import 'package:app/widgets/message_text.dart';
 import 'package:app/widgets/time_format.dart';
 
 /// WCAG contrast ratio between two opaque colours.
@@ -169,10 +171,75 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(seconds: 1));
       // Sent with its line breaks and indents, minus the blank edges
-      expect(find.text('Shelter B\n  - water\n  - blankets'), findsOneWidget);
+      expect(ApplicationAPI().historyFor('12D3KooWUiEmptyPeer').last['content'], 'Shelter B\n  - water\n  - blankets');
+      expect(find.textContaining('blankets', findRichText: true), findsOneWidget); // now in the thread
       expect(field().controller!.text, isEmpty);
       expect(tester.testTextInput.isVisible, isTrue);
       await tester.pump(const Duration(seconds: 5)); // let the failure notice time out
+    });
+
+    const triage = '# Triage update\n'
+        '**Warning:** road to the *north gate* is ~~open~~ closed\n\n'
+        '1. Saline\n2. Blankets\n\n'
+        '- [x] water\n- [ ] torches\n\n'
+        '> Bring ID if you have it\n\n'
+        'Meet at `51.5072,-0.1276`\n\n'
+        '```\nGRID 4Q FJ 12345 67890 and a long line that would not fit in a bubble without wrapping\n```\n\n'
+        '| Item | Qty |\n|---|---|\n| Saline | 2 |\n\n'
+        '![map](https://example.org/map.png) and [the form](https://example.org/form)';
+
+    for (final (size, scale) in [(const Size(390, 800), 1.0), (const Size(320, 640), 2.0)]) {
+      for (final mode in [ThemeMode.light, ThemeMode.dark]) {
+        testWidgets('Markdown messages lay out in both bubbles (${scale}x text, ${mode.name})', (tester) async {
+          await setScreen(tester, size);
+          final api = ApplicationAPI()..stopPolling();
+          final peer = '12D3KooWUiMarkdown${mode.name}${scale.toInt()}';
+          api.receiveFromNode(incoming(peer, 'md-$peer', triage, DateTime.now(), handle: 'medic'));
+          // Ours too: ember bubble (failed in tests, which has its own colours)
+          await expectLater(api.sendMessage(triage, peer), throwsA(isA<ApiException>()));
+          await tester.pumpWidget(host(ChatScreen(peerName: 'medic', peerId: peer), mode: mode, textScale: scale));
+          await tester.pump();
+          expect(find.byType(MarkdownBody), findsWidgets);
+          expect(tester.takeException(), isNull);
+          await tester.pump(const Duration(seconds: 1));
+        });
+      }
+    }
+
+    testWidgets('Markdown is formatted, images aren\'t fetched, and links ask first', (tester) async {
+      await setScreen(tester, const Size(390, 2000));
+      final api = ApplicationAPI()..stopPolling();
+      const peer = '12D3KooWUiMarkdownLinks';
+      api.receiveFromNode(incoming(peer, 'mdl-1', triage, DateTime.now(), handle: 'medic'));
+      api.receiveFromNode(incoming(peer, 'mdl-2', 'plain words, nothing to format', DateTime.now(), handle: 'medic'));
+      await tester.pumpWidget(host(const ChatScreen(peerName: 'medic', peerId: peer)));
+      await tester.pump();
+
+      // Plain messages skip the Markdown renderer
+      expect(find.text('plain words, nothing to format'), findsOneWidget);
+      expect(find.byType(MarkdownBody), findsOneWidget);
+      // Formatted, without the punctuation that asked for it
+      expect(find.textContaining('**', findRichText: true), findsNothing);
+      expect(find.textContaining('Triage update', findRichText: true), findsOneWidget);
+      expect(find.text('[image: map]'), findsOneWidget);
+      expect(find.byType(Image), findsNothing);
+
+      await tester.tap(find.textContaining('the form', findRichText: true));
+      await tester.pumpAndSettle();
+      expect(find.text('Open link?'), findsOneWidget);
+      expect(find.text('https://example.org/form'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.text('Open link?'), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(seconds: 1));
+    });
+
+    test('previews drop Markdown punctuation', () {
+      expect(markdownToPlain('**Warning:** road *closed*\n- bring `ID`'), 'Warning: road closed bring ID');
+      expect(markdownToPlain('> see [the form](https://x.org)'), 'see the form');
+      expect(markdownToPlain('# Status\n- [x] water'), 'Status water');
+      expect(markdownToPlain('ask medic_triage'), 'ask medic_triage');
     });
 
     testWidgets('an unsent draft survives leaving the chat, shows in the list, and goes once sent', (tester) async {
@@ -189,6 +256,8 @@ void main() {
       // Away to the Chats list: the draft is shown there, ahead of the last message
       await tester.pumpWidget(host(const MeshScreen()));
       await tester.pump(const Duration(milliseconds: 100));
+      await tester.enterText(find.byType(TextField), 'station4'); // other tests' chats are listed too
+      await tester.pump();
       expect(find.textContaining('Draft: Need 2 boxes of saline at Station 4'), findsOneWidget);
       expect(find.text('how many boxes?'), findsNothing);
 

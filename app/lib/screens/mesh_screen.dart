@@ -4,6 +4,7 @@ import '../services/draft_store.dart';
 import '../widgets/brand_mark.dart';
 import '../widgets/feedback.dart';
 import '../widgets/mesh_map.dart';
+import '../widgets/message_text.dart';
 import '../widgets/peer_display.dart';
 import '../widgets/peer_identity.dart';
 import '../widgets/time_format.dart';
@@ -290,7 +291,7 @@ class _PeerRow extends StatelessWidget {
     if (last == null) {
       preview = reachSentence(peer);
     } else {
-      final content = (last['content'] as String? ?? '').replaceAll('\n', ' ');
+      final content = markdownToPlain(last['content'] as String? ?? '');
       preview = last['isOutgoing'] == true
           ? switch (last['status']) {
               'failed' => 'Not delivered: $content',

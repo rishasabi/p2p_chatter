@@ -15,6 +15,7 @@ import 'services/draft_store.dart';
 import 'services/embedded_node_service.dart';
 import 'services/settings_store.dart';
 import 'theme/app_theme.dart';
+import 'widgets/message_text.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -107,7 +108,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     BleService().showMessageNotification(
       peerId: from,
       title: _api.displayName(from),
-      body: message['content'] as String,
+      body: markdownToPlain(message['content'] as String),
     );
   }
 
