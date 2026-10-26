@@ -44,8 +44,15 @@ class ApplicationAPI {
   List<String> _sharedAddrs = const [];
 
   /// Everyone we've been connected to, persisted with their handle and last
-  /// known Wi-Fi addresses so either transport can find them again later.
+  /// known Wi-Fi addresses so either transport can find them again later,
+  /// plus what only this phone decides about them: 'firstSeen', 'verified'
+  /// and 'alias'. Nothing a peer sends ever touches those three.
   final Map<String, Map<String, dynamic>> _contacts = {};
+
+  /// The first peer seen with each handle, keyed by [_handleKey]. Handles are
+  /// just names anyone can pick; the peer ID is the identity. A later peer
+  /// with the same (or a lookalike) handle is flagged as a possible impostor.
+  final Map<String, String> _handleOwners = {};
 
   /// Peers the Go node currently holds a Wi-Fi (TCP) connection to.
   final Set<String> _wifiPeers = {};
@@ -115,6 +122,20 @@ class ApplicationAPI {
     stored.forEach((id, value) {
       if (value is Map) _contacts[id] = Map<String, dynamic>.from(value);
     });
+    final owners = await LocalStore.read('handles.json');
+    owners.forEach((key, id) {
+      if (id is String) _handleOwners[key] = id;
+    });
+    // Contacts saved before handles were tracked: first saved, first owner
+    var seeded = false;
+    _contacts.forEach((id, contact) {
+      final handle = contact['handle'] as String?;
+      if (handle != null && handle.isNotEmpty && !_handleOwners.containsKey(_handleKey(handle))) {
+        _handleOwners[_handleKey(handle)] = id;
+        seeded = true;
+      }
+    });
+    if (seeded) _saveContacts();
     await _loadHistory();
 
     final info = await getNode();
@@ -201,10 +222,16 @@ class ApplicationAPI {
 
   // ── Peers ───────────────────────────────────────────────────────────────────
 
-  /// Best name for [peerId]: its handle, else its Bluetooth name, else its ID.
+  /// Best name for [peerId]: the alias given to it on this phone, else its
+  /// handle (with the end of its peer ID if another phone claimed that handle
+  /// first, e.g. "alice (#4f9a)"), else its Bluetooth name, else its ID.
   String displayName(String peerId) {
-    final handle = _contacts[peerId]?['handle'] as String?;
-    if (handle != null && handle.isNotEmpty) return handle;
+    final alias = aliasOf(peerId);
+    if (alias != null) return alias;
+    final handle = handleOf(peerId);
+    if (handle != null) {
+      return hasHandleConflict(peerId) ? '$handle (#${peerId.substring(peerId.length - 4)})' : handle;
+    }
     final btName = _bluetoothPeers[peerId]?['name'] as String?;
     if (btName != null && btName.isNotEmpty) return btName;
     return peerId.length > 20 ? '${peerId.substring(0, 16)}…' : peerId;
@@ -224,6 +251,9 @@ class ApplicationAPI {
       'id': peerId,
       'name': displayName(peerId),
       'handle': _contacts[peerId]?['handle'],
+      'alias': aliasOf(peerId),
+      'verified': isVerified(peerId),
+      'handleConflict': hasHandleConflict(peerId),
       'wifi': wifi,
       'bt': bt,
       'mesh': mesh,
@@ -272,27 +302,126 @@ class ApplicationAPI {
   void _rememberContact(String peerId, {String? handle, List<String>? addrs}) {
     if (peerId.isEmpty || peerId == _myPeerId) return;
     var changed = !_contacts.containsKey(peerId);
-    final contact = _contacts.putIfAbsent(peerId, () => <String, dynamic>{});
+    final contact = _contactFor(peerId);
     if (handle != null && handle.isNotEmpty && contact['handle'] != handle) {
       contact['handle'] = handle;
+      _handleOwners.putIfAbsent(_handleKey(handle), () => peerId);
       changed = true;
     }
     if (addrs != null && addrs.isNotEmpty && !listEquals(contact['addrs'] as List?, addrs)) {
       contact['addrs'] = addrs;
       changed = true;
     }
-    if (changed) {
-      _saveTimer?.cancel();
-      _saveTimer = Timer(const Duration(milliseconds: 500), () => LocalStore.write('contacts.json', _contacts));
+    if (changed) _saveContacts();
+  }
+
+  /// [peerId]'s contact entry, created (and dated) the first time we hear of it.
+  Map<String, dynamic> _contactFor(String peerId) => _contacts.putIfAbsent(
+      peerId, () => <String, dynamic>{'firstSeen': DateTime.now().toUtc().toIso8601String()});
+
+  void _saveContacts() {
+    _saveTimer?.cancel();
+    _saveTimer = Timer(const Duration(milliseconds: 500), () {
+      LocalStore.write('contacts.json', _contacts);
+      LocalStore.write('handles.json', _handleOwners);
+    });
+  }
+
+  // ── Trust ───────────────────────────────────────────────────────────────────
+
+  /// Folds a handle down to what it looks like, so lookalikes collide: case,
+  /// 0/o, 1/l/I and the separators are easy to mix up at a glance.
+  static String _handleKey(String handle) => handle
+      .toLowerCase()
+      .replaceAll('0', 'o')
+      .replaceAll(RegExp('[1i]'), 'l')
+      .replaceAll(RegExp(r'[.\-]'), '_');
+
+  /// The handle [peerId] advertises, if any (whatever its alias here).
+  String? handleOf(String peerId) {
+    final handle = _contacts[peerId]?['handle'] as String?;
+    return handle != null && handle.isNotEmpty ? handle : null;
+  }
+
+  /// The private name this user gave [peerId], if any.
+  String? aliasOf(String peerId) {
+    final alias = _contacts[peerId]?['alias'] as String?;
+    return alias != null && alias.isNotEmpty ? alias : null;
+  }
+
+  /// Names [peerId] [alias] on this phone only, in place of its handle; an
+  /// empty alias goes back to the handle.
+  void setAlias(String peerId, String? alias) {
+    if (peerId.isEmpty || peerId == _myPeerId) return;
+    final a = alias?.trim() ?? '';
+    final contact = _contactFor(peerId);
+    if ((contact['alias'] ?? '') == a) return;
+    if (a.isEmpty) {
+      contact.remove('alias');
+    } else {
+      contact['alias'] = a;
     }
+    _saveContacts();
+    _publishPeerChanges();
+  }
+
+  /// Whether this user has checked [peerId] in person and marked it verified.
+  bool isVerified(String peerId) => _contacts[peerId]?['verified'] == true;
+
+  void setVerified(String peerId, bool verified) {
+    if (peerId.isEmpty || peerId == _myPeerId || isVerified(peerId) == verified) return;
+    final contact = _contactFor(peerId);
+    if (verified) {
+      contact['verified'] = true;
+    } else {
+      contact.remove('verified');
+    }
+    _saveContacts();
+    _publishPeerChanges(); // can settle or raise conflicts over its handle
+  }
+
+  /// When this phone first heard of [peerId]; null for contacts saved
+  /// before that was recorded.
+  DateTime? firstSeen(String peerId) {
+    final at = _contacts[peerId]?['firstSeen'] as String?;
+    return at == null ? null : DateTime.tryParse(at)?.toLocal();
+  }
+
+  /// Who rightfully goes by handles that look like [key]: this user for
+  /// their own handle, else a peer they verified, else whoever was seen first.
+  String? _handleOwner(String key) {
+    final myHandle = _myHandle;
+    if (myHandle != null && _myPeerId != null && _handleKey(myHandle) == key) return _myPeerId;
+    for (final entry in _contacts.entries) {
+      final handle = entry.value['handle'] as String?;
+      if (entry.value['verified'] == true && handle != null && _handleKey(handle) == key) return entry.key;
+    }
+    return _handleOwners[key];
+  }
+
+  /// Whether [peerId] uses a handle (or a lookalike) that belongs to another
+  /// peer ID, so it may be impersonating someone. Verified peers never are.
+  bool hasHandleConflict(String peerId) {
+    final handle = handleOf(peerId);
+    if (handle == null || isVerified(peerId)) return false;
+    final owner = _handleOwner(_handleKey(handle));
+    return owner != null && owner != peerId;
+  }
+
+  /// Whether a phone advertising [handle] nearby, whose peer ID starts with
+  /// [peerIdPrefix], claims a handle that belongs to someone else.
+  bool advertisedHandleConflicts(String handle, String peerIdPrefix) {
+    if (handle.isEmpty || peerIdPrefix.isEmpty) return false;
+    final owner = _handleOwner(_handleKey(handle));
+    return owner != null && !owner.startsWith(peerIdPrefix);
   }
 
   /// Notifies listeners about every peer whose status changed.
   void _publishPeerChanges() {
     for (final status in peers) {
       final id = status['id'] as String;
-      final signature =
-          '${status['name']}|${status['wifi']}|${status['bt']}|${status['mesh']}|${status['unread']}';
+      final signature = '${status['name']}|${status['wifi']}|${status['bt']}|${status['mesh']}|${status['unread']}'
+          '|${status['verified']}|${status['handleConflict']}';
       if (_publishedStatus[id] == signature) continue;
       _publishedStatus[id] = signature;
       for (final cb in List.of(_peerUpdateCallbacks)) {

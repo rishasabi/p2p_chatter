@@ -349,6 +349,14 @@ class ChatterColors extends ThemeExtension<ChatterColors> {
   /// Range rings and out-of-range nodes on the mesh map.
   final Color faint;
 
+  /// A peer this user checked in person and marked verified.
+  final Color verified;
+
+  /// Impersonation warnings: the icon on its own, and the banner.
+  final Color warning;
+  final Color warningContainer;
+  final Color onWarningContainer;
+
   const ChatterColors({
     required this.bubbleOut,
     required this.onBubbleOut,
@@ -357,6 +365,10 @@ class ChatterColors extends ThemeExtension<ChatterColors> {
     required this.reach,
     required this.link,
     required this.faint,
+    required this.verified,
+    required this.warning,
+    required this.warningContainer,
+    required this.onWarningContainer,
   });
 
   static const light = ChatterColors(
@@ -367,6 +379,10 @@ class ChatterColors extends ThemeExtension<ChatterColors> {
     reach: Color(0xFF136B46),
     link: Color(0xFFC77700),
     faint: Color(0xFFCFCBE0),
+    verified: Color(0xFF1A5FB4),
+    warning: Color(0xFF7A5900),
+    warningContainer: Color(0xFFFFEBAD),
+    onWarningContainer: Color(0xFF3B2C00),
   );
 
   static const dark = ChatterColors(
@@ -377,6 +393,10 @@ class ChatterColors extends ThemeExtension<ChatterColors> {
     reach: Color(0xFF74D1B0),
     link: AppTheme.ember,
     faint: Color(0xFF34385A),
+    verified: Color(0xFF8AB4F8),
+    warning: Color(0xFFF2C94C),
+    warningContainer: Color(0xFF4A3800),
+    onWarningContainer: Color(0xFFFFE08A),
   );
 
   static ChatterColors of(BuildContext context) =>
@@ -392,6 +412,10 @@ class ChatterColors extends ThemeExtension<ChatterColors> {
     Color? reach,
     Color? link,
     Color? faint,
+    Color? verified,
+    Color? warning,
+    Color? warningContainer,
+    Color? onWarningContainer,
   }) =>
       ChatterColors(
         bubbleOut: bubbleOut ?? this.bubbleOut,
@@ -401,6 +425,10 @@ class ChatterColors extends ThemeExtension<ChatterColors> {
         reach: reach ?? this.reach,
         link: link ?? this.link,
         faint: faint ?? this.faint,
+        verified: verified ?? this.verified,
+        warning: warning ?? this.warning,
+        warningContainer: warningContainer ?? this.warningContainer,
+        onWarningContainer: onWarningContainer ?? this.onWarningContainer,
       );
 
   @override
@@ -414,6 +442,10 @@ class ChatterColors extends ThemeExtension<ChatterColors> {
       reach: Color.lerp(reach, other.reach, t)!,
       link: Color.lerp(link, other.link, t)!,
       faint: Color.lerp(faint, other.faint, t)!,
+      verified: Color.lerp(verified, other.verified, t)!,
+      warning: Color.lerp(warning, other.warning, t)!,
+      warningContainer: Color.lerp(warningContainer, other.warningContainer, t)!,
+      onWarningContainer: Color.lerp(onWarningContainer, other.onWarningContainer, t)!,
     );
   }
 }

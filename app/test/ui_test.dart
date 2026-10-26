@@ -71,6 +71,9 @@ void main() {
           'error text': (cs.error, cs.surface),
           'online status text': (chatter.reach, cs.surface),
           'nav selected icon': (cs.onPrimaryContainer, cs.primaryContainer),
+          'verified badge': (chatter.verified, cs.surface),
+          'impersonation warning text': (chatter.warning, cs.surface),
+          'impersonation banner': (chatter.onWarningContainer, chatter.warningContainer),
         };
         pairs.forEach((what, pair) {
           expect(contrast(pair.$1, pair.$2), greaterThanOrEqualTo(4.5), reason: '$name: $what');
@@ -165,6 +168,77 @@ void main() {
       expect(tester.testTextInput.isVisible, isTrue);
       await tester.pump(const Duration(seconds: 5)); // let the failure notice time out
     });
+
+    testWidgets('an impostor is flagged, and the identity sheet copies the ID, verifies and renames', (tester) async {
+      await setScreen(tester, const Size(390, 800));
+      final api = ApplicationAPI()..stopPolling();
+      const real = '12D3KooWUiRealCoordinator';
+      const fake = '12D3KooWUiFakeCoordinatorK7pQ';
+      api.receiveFromNode(incoming(real, 'id-1', 'water at the gym', DateTime.now(), handle: 'coordinator'));
+      api.receiveFromNode(incoming(fake, 'id-2', 'everyone to the bridge', DateTime.now(), handle: 'Coordinator'));
+
+      String? copied;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.setData') copied = (call.arguments as Map)['text'] as String;
+        return null;
+      });
+      addTearDown(() => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null));
+
+      await tester.pumpWidget(host(const ChatScreen(peerName: 'Coordinator', peerId: fake)));
+      await tester.pump();
+      expect(find.text('Coordinator (#K7pQ)'), findsOneWidget);
+      expect(find.textContaining('Impersonation warning'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('Peer identity'));
+      await tester.pumpAndSettle();
+      expect(find.text(fake), findsOneWidget); // the full ID, in the sheet
+      expect(find.text('Advertised handle: @Coordinator'), findsOneWidget);
+
+      await tester.tap(find.text('Copy peer ID'));
+      await tester.pump();
+      expect(copied, fake);
+      expect(find.text('Copied'), findsOneWidget);
+
+      await tester.enterText(find.widgetWithText(TextField, 'Your name for them'), 'Stranger at the gym');
+      await tester.pump();
+      await tester.ensureVisible(find.text('Verified contact'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Verified contact'));
+      await tester.pump();
+      expect(api.isVerified(fake), isTrue);
+
+      // Back in the chat: the private name, a verified badge and no warning
+      Navigator.of(tester.element(find.byType(BottomSheet))).pop();
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsNothing);
+      expect(find.text('Stranger at the gym'), findsOneWidget);
+      expect(find.byIcon(Icons.verified), findsOneWidget);
+      expect(find.textContaining('Impersonation warning'), findsNothing);
+      expect(tester.takeException(), isNull);
+
+      api.setVerified(fake, false);
+      api.setAlias(fake, null);
+      await tester.pump(const Duration(seconds: 3)); // save timer, copied label
+    });
+
+    for (final mode in [ThemeMode.light, ThemeMode.dark]) {
+      testWidgets('identity sheet lays out at 320px wide with 2x text in ${mode.name} mode', (tester) async {
+        await setScreen(tester, const Size(320, 640));
+        final api = ApplicationAPI()..stopPolling();
+        const peer = '12D3KooWUiSheetPeerWithAVeryLongIdentifier';
+        api.receiveFromNode(incoming('12D3KooWUiSheetFirst', 'sh-0-${mode.name}', 'hi', DateTime.now(), handle: 'shelter_lead'));
+        api.receiveFromNode(incoming(peer, 'sh-${mode.name}', 'hi', DateTime.now(), handle: 'Shelter.Lead'));
+        await tester.pumpWidget(host(const ChatScreen(peerName: 'x', peerId: peer), mode: mode, textScale: 2));
+        await tester.pump();
+        expect(find.textContaining('Impersonation warning'), findsOneWidget);
+        await tester.tap(find.textContaining('Impersonation warning'));
+        await tester.pumpAndSettle();
+        await tester.scrollUntilVisible(find.text('Your name for them'), 200,
+            scrollable: find.descendant(of: find.byType(BottomSheet), matching: find.byType(Scrollable)).first);
+        expect(tester.takeException(), isNull);
+        await tester.pump(const Duration(seconds: 1));
+      });
+    }
 
     for (final mode in [ThemeMode.light, ThemeMode.dark]) {
       testWidgets('lays out at 320px wide with 2x text in ${mode.name} mode', (tester) async {
@@ -281,7 +355,16 @@ void main() {
         expect(find.text('Wi-Fi QR'), findsOneWidget);
         expect(find.text('Wi-Fi / hotspot connection code'), findsOneWidget);
         expect(find.textContaining('use the Bluetooth \'Nearby\' tab'), findsOneWidget);
+
+        // The full ID, for anyone verifying this phone, and a way to copy it
+        expect(find.text('12D3KooWUiQrPeer'), findsOneWidget);
+        await tester.ensureVisible(find.text('Copy my peer ID'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Copy my peer ID'));
+        await tester.pump();
+        expect(find.text('Peer ID copied to clipboard'), findsOneWidget);
         expect(tester.takeException(), isNull);
+        await tester.pump(const Duration(seconds: 3)); // let the notice time out
       });
     }
 

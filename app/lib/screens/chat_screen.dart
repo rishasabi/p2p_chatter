@@ -5,6 +5,7 @@ import '../services/api_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/feedback.dart';
 import '../widgets/peer_display.dart';
+import '../widgets/peer_identity.dart';
 import '../widgets/time_format.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -157,6 +158,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
   }
 
+  void _showIdentity() {
+    FocusScope.of(context).unfocus();
+    showPeerIdentitySheet(context, widget.peerId);
+  }
+
   void _copyMessage(String content) {
     Clipboard.setData(ClipboardData(text: content));
     showNotice(context, 'Message copied', tone: NoticeTone.success, duration: const Duration(seconds: 2));
@@ -178,42 +184,75 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
 
+    final verified = _status['verified'] == true;
+    final conflict = _status['handleConflict'] == true;
+
     return Scaffold(
       appBar: AppBar(
         titleSpacing: 0,
         title: Semantics(
           header: true,
-          label: '$_peerName, ${reachSentence(_status)}',
+          button: true,
+          label: [
+            _peerName,
+            if (verified) 'verified contact',
+            if (conflict) 'impersonation warning',
+            reachSentence(_status),
+          ].join(', '),
+          onTapHint: 'Show identity',
+          onTap: _showIdentity,
           excludeSemantics: true,
-          child: Row(
-            children: [
-              PeerAvatar(peerId: widget.peerId, name: _peerName, online: _isOnline, size: 40),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      _peerName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.titleLarge,
-                    ),
-                    Text(
-                      reachSentence(_status),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.bodySmall!.copyWith(
-                        color: _isOnline ? ChatterColors.of(context).reach : cs.onSurfaceVariant,
+          child: InkWell(
+            onTap: _showIdentity,
+            borderRadius: BorderRadius.circular(12),
+            child: Row(
+              children: [
+                PeerAvatar(peerId: widget.peerId, name: _peerName, online: _isOnline, size: 40),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              _peerName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.titleLarge,
+                            ),
+                          ),
+                          if (verified || conflict) ...[
+                            const SizedBox(width: 6),
+                            TrustMark.of(_status),
+                          ],
+                        ],
                       ),
-                    ),
-                  ],
+                      Text(
+                        reachSentence(_status),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall!.copyWith(
+                          color: _isOnline ? ChatterColors.of(context).reach : cs.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.shield_outlined),
+            tooltip: 'Peer identity',
+            onPressed: _showIdentity,
+          ),
+          const SizedBox(width: 4),
+        ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(1),
           child: Divider(height: 1, color: cs.outlineVariant),
@@ -221,6 +260,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       ),
       body: Column(
         children: [
+          if (conflict) ImpersonationWarning(onTap: _showIdentity),
           Expanded(
             child: _messages.isEmpty ? _buildEmptyThread() : _buildThread(),
           ),

@@ -4,6 +4,7 @@ import '../widgets/brand_mark.dart';
 import '../widgets/feedback.dart';
 import '../widgets/mesh_map.dart';
 import '../widgets/peer_display.dart';
+import '../widgets/peer_identity.dart';
 import '../widgets/time_format.dart';
 import 'chat_screen.dart';
 
@@ -74,9 +75,11 @@ class _MeshScreenState extends State<MeshScreen> {
         filteredPeers = List.from(peers);
       } else {
         filteredPeers = peers.where((peer) {
+          // The name may be a private alias; the handle they chose still finds them
           final name = peer['name'].toString().toLowerCase();
+          final handle = (peer['handle'] as String? ?? '').toLowerCase();
           final id = peer['id'].toString().toLowerCase();
-          return name.contains(query) || id.contains(query);
+          return name.contains(query) || handle.contains(query) || id.contains(query);
         }).toList();
       }
     });
@@ -234,6 +237,7 @@ class _MeshScreenState extends State<MeshScreen> {
             peer: peer,
             lastMessage: history.isEmpty ? null : history.last,
             onTap: () => _openChat(peer),
+            onLongPress: () => showPeerIdentitySheet(context, peer['id'] as String),
           );
         },
       ),
@@ -247,8 +251,15 @@ class _PeerRow extends StatelessWidget {
   final Map<String, dynamic> peer;
   final Map<String, dynamic>? lastMessage;
   final VoidCallback onTap;
+  final VoidCallback onLongPress;
 
-  const _PeerRow({super.key, required this.peer, required this.lastMessage, required this.onTap});
+  const _PeerRow({
+    super.key,
+    required this.peer,
+    required this.lastMessage,
+    required this.onTap,
+    required this.onLongPress,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -275,8 +286,12 @@ class _PeerRow extends StatelessWidget {
     }
     final time = last == null ? null : formatListTime(context, last['timestamp'] as DateTime);
 
+    final verified = peer['verified'] == true;
+    final conflict = peer['handleConflict'] == true;
     final label = [
       name,
+      if (verified) 'verified contact',
+      if (conflict) 'impersonation warning: this handle is also claimed by another device',
       reachSentence(peer),
       if (unread > 0) '$unread unread',
       if (last != null) 'last message $time: $preview',
@@ -287,8 +302,11 @@ class _PeerRow extends StatelessWidget {
       label: label,
       excludeSemantics: true,
       onTap: onTap,
+      onLongPressHint: 'Show identity',
+      onLongPress: onLongPress,
       child: InkWell(
         onTap: onTap,
+        onLongPress: onLongPress,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
           child: Row(
@@ -304,11 +322,21 @@ class _PeerRow extends StatelessWidget {
                       textBaseline: TextBaseline.alphabetic,
                       children: [
                         Expanded(
-                          child: Text(
-                            name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.titleMedium,
+                          child: Row(
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  name,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: theme.textTheme.titleMedium,
+                                ),
+                              ),
+                              if (verified || conflict) ...[
+                                const SizedBox(width: 6),
+                                TrustMark.of(peer, size: 16),
+                              ],
+                            ],
                           ),
                         ),
                         if (time != null) ...[

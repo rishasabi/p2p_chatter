@@ -257,6 +257,54 @@ void main() {
       expect(ApplicationAPI.validateHandle('has space'), isNotNull);
     });
 
+    test('a later phone claiming a known handle, or a lookalike, is flagged and told apart', () {
+      final api = ApplicationAPI()..stopPolling();
+      const medic = '12D3KooWTrustRealMedic';
+      const fake = '12D3KooWTrustFakeMedicQ9zX';
+      api.receiveFromNode(fromNode(medic, 't-1', 'triage at tent 4', handle: 'Medic_Triage'));
+      expect(api.hasHandleConflict(medic), isFalse);
+      expect(api.displayName(medic), 'Medic_Triage');
+      expect(api.firstSeen(medic), isNotNull);
+
+      // Different case and separator, same look
+      api.receiveFromNode(fromNode(fake, 't-2', 'come to the north gate', handle: 'medic-tr1age'));
+      expect(api.hasHandleConflict(fake), isTrue);
+      expect(api.peerStatus(fake)['handleConflict'], isTrue);
+      expect(api.displayName(fake), 'medic-tr1age (#Q9zX)');
+      expect(api.hasHandleConflict(medic), isFalse, reason: 'the first phone keeps the handle');
+
+      // A Nearby phone not yet known, advertising the same handle
+      expect(api.advertisedHandleConflicts('MEDIC_TRIAGE', '12D3KooWTrustOther'), isTrue);
+      expect(api.advertisedHandleConflicts('Medic_Triage', '12D3KooWTrustRealMe'), isFalse);
+
+      // Checking in person settles it: the verified phone owns the handle
+      api.setVerified(fake, true);
+      expect(api.hasHandleConflict(fake), isFalse);
+      expect(api.hasHandleConflict(medic), isTrue);
+      expect(api.displayName(fake), 'medic-tr1age');
+      api.setVerified(fake, false);
+      expect(api.hasHandleConflict(fake), isTrue);
+      expect(api.hasHandleConflict(medic), isFalse);
+    });
+
+    test('a local alias replaces the handle and peers cannot change it', () {
+      final api = ApplicationAPI()..stopPolling();
+      const peer = '12D3KooWTrustAliasPeer';
+      api.receiveFromNode(fromNode(peer, 'a-1', 'hi', handle: 'alice'));
+      api.setAlias(peer, '  Alice (Verified Volunteer) ');
+      expect(api.displayName(peer), 'Alice (Verified Volunteer)');
+      expect(api.peerStatus(peer)['name'], 'Alice (Verified Volunteer)');
+
+      // The peer renaming itself changes its handle, not our name for it
+      api.receiveFromNode(fromNode(peer, 'a-2', 'new name', handle: 'coordinator'));
+      expect(api.handleOf(peer), 'coordinator');
+      expect(api.displayName(peer), 'Alice (Verified Volunteer)');
+
+      api.setAlias(peer, ' ');
+      expect(api.aliasOf(peer), isNull);
+      expect(api.displayName(peer), 'coordinator');
+    });
+
     test('peer status follows the Bluetooth link and keeps known peers', () async {
       final api = ApplicationAPI()..stopPolling();
       final updates = <Map<String, dynamic>>[];

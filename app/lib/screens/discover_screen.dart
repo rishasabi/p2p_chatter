@@ -12,6 +12,7 @@ import '../services/ble_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/feedback.dart';
 import '../widgets/peer_display.dart';
+import '../widgets/peer_identity.dart';
 import 'chat_screen.dart';
 
 class DiscoverScreen extends StatefulWidget {
@@ -197,11 +198,11 @@ class _DiscoverScreenState extends State<DiscoverScreen> with WidgetsBindingObse
     );
   }
 
-  /// The handle inside a scanned Chatter code, for messages only.
-  static String? _nameInCode(String code) {
+  /// A text field of a Chatter code (e.g. 'name', the handle), or null.
+  static String? _fieldInCode(String code, String field) {
     try {
       final decoded = jsonDecode(code);
-      if (decoded is Map && decoded['name'] is String) return decoded['name'] as String;
+      if (decoded is Map && decoded[field] is String) return decoded[field] as String;
     } catch (_) {}
     return null;
   }
@@ -213,7 +214,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> with WidgetsBindingObse
     if (cleanAddr.isEmpty) return null;
 
     setState(() => _isConnecting = true);
-    final name = _nameInCode(cleanAddr);
+    final name = _fieldInCode(cleanAddr, 'name');
 
     showNotice(context, name != null ? 'Connecting to $name…' : 'Connecting…',
         duration: const Duration(seconds: 2));
@@ -315,6 +316,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> with WidgetsBindingObse
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
     final handle = api.myHandle;
+    final myId = _nodeInfo?.id ?? api.myPeerId ?? _fieldInCode(_currentBootstrapData, 'id');
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -377,11 +379,12 @@ class _DiscoverScreenState extends State<DiscoverScreen> with WidgetsBindingObse
                   ),
                   const SizedBox(height: 20),
                   if (handle != null) Text('@$handle', style: theme.textTheme.titleLarge, textAlign: TextAlign.center),
-                  if (_nodeInfo != null) ...[
+                  // In full, so someone verifying you can check every character
+                  if (myId != null) ...[
                     const SizedBox(height: 4),
-                    Text(
-                      compactPeerId(_nodeInfo!.id),
-                      style: theme.textTheme.bodySmall!.copyWith(color: cs.onSurfaceVariant),
+                    SelectableText(
+                      myId,
+                      style: theme.textTheme.bodySmall!.copyWith(color: cs.onSurfaceVariant, fontFamily: 'monospace'),
                       textAlign: TextAlign.center,
                     ),
                   ],
@@ -393,13 +396,26 @@ class _DiscoverScreenState extends State<DiscoverScreen> with WidgetsBindingObse
                     style: theme.textTheme.bodyMedium!.copyWith(color: cs.onSurfaceVariant),
                   ),
                   const SizedBox(height: 20),
-                  OutlinedButton.icon(
-                    icon: const Icon(Icons.copy, size: 20),
-                    label: const Text('Copy code as text'),
-                    onPressed: () {
-                      Clipboard.setData(ClipboardData(text: _currentBootstrapData));
-                      showNotice(context, 'Code copied', tone: NoticeTone.success, duration: const Duration(seconds: 2));
-                    },
+                  Wrap(
+                    alignment: WrapAlignment.center,
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      OutlinedButton.icon(
+                        icon: const Icon(Icons.copy, size: 20),
+                        label: const Text('Copy code as text'),
+                        onPressed: () {
+                          Clipboard.setData(ClipboardData(text: _currentBootstrapData));
+                          showNotice(context, 'Code copied', tone: NoticeTone.success, duration: const Duration(seconds: 2));
+                        },
+                      ),
+                      if (myId != null)
+                        OutlinedButton.icon(
+                          icon: const Icon(Icons.fingerprint, size: 20),
+                          label: const Text('Copy my peer ID'),
+                          onPressed: () => copyPeerId(context, myId),
+                        ),
+                    ],
                   ),
                 ],
               ),
@@ -549,12 +565,14 @@ class _DiscoverScreenState extends State<DiscoverScreen> with WidgetsBindingObse
   }
 
   /// Whether [node] matches the Nearby search: its advertised name, or the
-  /// peer ID it advertises (or the full ID behind it, once we know it).
+  /// peer ID it advertises (or, once we know it, the full ID behind it and
+  /// the name we gave it).
   bool _matchesNearbySearch(NearbyNode node, String query) {
     if (query.isEmpty) return true;
     final prefix = node.peerIdPrefix ?? '';
     final peerId = prefix.isEmpty ? null : api.peerIdForPrefix(prefix);
-    return [node.name, prefix, ?peerId].any((s) => s.toLowerCase().contains(query));
+    return [node.name, prefix, ?peerId, if (peerId != null) api.displayName(peerId)]
+        .any((s) => s.toLowerCase().contains(query));
   }
 
   Widget _buildNearbyBleTab() {
@@ -700,15 +718,44 @@ class _DiscoverScreenState extends State<DiscoverScreen> with WidgetsBindingObse
     final linked = peerId != null && api.isBluetoothLinked(peerId);
     final idText = peerId != null ? compactPeerId(peerId) : '$prefix…';
     final signal = _signalOf(node);
+    // A phone we don't know yet can still be claiming a known handle
+    final name = peerId != null ? api.displayName(peerId) : node.name;
+    final verified = peerId != null && api.isVerified(peerId);
+    final conflict = peerId != null ? api.hasHandleConflict(peerId) : api.advertisedHandleConflicts(node.name, prefix);
+    final chatter = ChatterColors.of(context);
 
     return ListTile(
       key: ValueKey(prefix),
-      leading: PeerAvatar(peerId: peerId ?? prefix, name: node.name, online: linked, size: 44),
-      title: Text(node.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleMedium),
+      leading: PeerAvatar(peerId: peerId ?? prefix, name: name, online: linked, size: 44),
+      title: Row(
+        children: [
+          Flexible(child: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: theme.textTheme.titleMedium)),
+          if (verified || conflict) ...[
+            const SizedBox(width: 6),
+            TrustMark(verified: verified, conflict: conflict, size: 16),
+          ],
+        ],
+      ),
       subtitle: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(idText, maxLines: 1, overflow: TextOverflow.ellipsis),
+          Row(
+            children: [
+              Flexible(child: Text(idText, maxLines: 1, overflow: TextOverflow.ellipsis)),
+              if (peerId != null)
+                IconButton(
+                  icon: const Icon(Icons.copy, size: 18),
+                  tooltip: 'Copy peer ID',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => copyPeerId(context, peerId),
+                ),
+            ],
+          ),
+          if (conflict)
+            Text(
+              'Handle also claimed by another device',
+              style: theme.textTheme.bodySmall!.copyWith(color: chatter.warning, fontWeight: FontWeight.w600),
+            ),
           const SizedBox(height: 2),
           Wrap(
             spacing: 6,
