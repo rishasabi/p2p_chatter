@@ -499,6 +499,34 @@ class ApplicationAPI {
     return owner != null && owner != peerId;
   }
 
+  /// Whether another device this phone knows of (or this user) goes by
+  /// [peerId]'s handle or one that looks like it, so the name alone can't
+  /// tell them apart. Unlike [hasHandleConflict], true for the rightful
+  /// owner as well as the later claimant.
+  bool handleShared(String peerId) {
+    final handle = handleOf(peerId);
+    if (handle == null) return false;
+    final key = _handleKey(handle);
+    final mine = _myHandle;
+    if (peerId != _myPeerId && mine != null && _handleKey(mine) == key) return true;
+    return _contacts.entries.any((e) {
+      final theirs = e.value['handle'] as String?;
+      return e.key != peerId && theirs != null && theirs.isNotEmpty && _handleKey(theirs) == key;
+    });
+  }
+
+  /// How a channel post names its author: the private alias given here if
+  /// any, else '@handle', with the end of the peer ID (which no one can
+  /// copy) only when another device uses the same or a lookalike handle,
+  /// e.g. '@alice (#4f9a)'.
+  String authorLabel(String peerId) {
+    final alias = aliasOf(peerId);
+    if (alias != null) return alias;
+    final handle = handleOf(peerId);
+    if (handle == null) return displayName(peerId);
+    return handleShared(peerId) ? '@$handle (#${peerId.substring(peerId.length - 4)})' : '@$handle';
+  }
+
   /// Whether a phone advertising [handle] nearby, whose peer ID starts with
   /// [peerIdPrefix], claims a handle that belongs to someone else.
   bool advertisedHandleConflicts(String handle, String peerIdPrefix) {

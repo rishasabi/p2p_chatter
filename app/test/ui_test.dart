@@ -875,16 +875,48 @@ void main() {
       await tester.tap(find.text('#general'));
       await tester.pumpAndSettle();
       expect(find.text('Open: every phone in range can read it'), findsOneWidget);
-      // Each author by name and the end of their peer ID; the lookalike is flagged
-      expect(find.text('chan_medic'), findsOneWidget);
-      expect(find.text('…${medic.substring(medic.length - 6)}'), findsOneWidget);
-      expect(find.text('Chan_Medic (#${fake.substring(fake.length - 4)})'), findsOneWidget);
-      expect(find.byIcon(Icons.warning_amber_rounded), findsOneWidget);
+      // Two devices go by lookalike handles: both get the end of their peer
+      // ID and a warning, the later one as a possible impersonator
+      final realName = '@chan_medic (#${medic.substring(medic.length - 4)})';
+      expect(find.text(realName), findsOneWidget);
+      expect(find.text('@Chan_Medic (#${fake.substring(fake.length - 4)})'), findsOneWidget);
+      expect(find.byIcon(Icons.warning_amber_rounded), findsNWidgets(2));
+      // and a screen reader hears which is which, as part of each post
+      expect(find.bySemanticsLabel(RegExp(r'^@Chan_Medic .*, impersonation warning,')), findsOneWidget);
+      expect(find.bySemanticsLabel(RegExp(r'^@chan_medic .*, another device uses this handle,')), findsOneWidget);
 
       // Tapping an author opens their identity
-      await tester.tap(find.text('chan_medic'));
+      await tester.tap(find.text(realName));
       await tester.pumpAndSettle();
       expect(find.text(medic), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(seconds: 1));
+    });
+
+    testWidgets('an author with a handle of their own shows just @handle; an alias shows instead', (tester) async {
+      await setScreen(tester, const Size(390, 900));
+      final api = ApplicationAPI()..stopPolling();
+      await api.joinChannel('clean-names');
+      const sarah = '12D3KooWUiCleanSarah7f3a';
+      api.receiveFromNode(post(sarah, 'cn-1', 'Clinic opens at 8', 'dr_sarah', room: 'clean-names'));
+      await tester.pumpWidget(host(const ChatScreen(peerName: 'clean-names', peerId: 'room:clean-names')));
+      await tester.pump();
+
+      expect(find.text('@dr_sarah'), findsOneWidget);
+      expect(find.textContaining('7f3a'), findsNothing); // no peer ID clutter
+      expect(find.byIcon(Icons.warning_amber_rounded), findsNothing);
+
+      // The full ID is a tap away
+      await tester.tap(find.text('@dr_sarah'));
+      await tester.pumpAndSettle();
+      expect(find.text(sarah), findsOneWidget);
+      await tester.tapAt(const Offset(10, 10)); // dismiss the sheet
+      await tester.pumpAndSettle();
+
+      api.setAlias(sarah, 'Sarah (clinic)');
+      await tester.pump();
+      expect(find.text('Sarah (clinic)'), findsOneWidget);
+      api.setAlias(sarah, null);
       expect(tester.takeException(), isNull);
       await tester.pump(const Duration(seconds: 1));
     });

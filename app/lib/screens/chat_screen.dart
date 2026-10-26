@@ -432,15 +432,17 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 return _MessageBubble(
                   key: ValueKey(m['id']),
                   message: m,
-                  peerName: author != null ? api.displayName(author) : _peerName,
-                  // In a channel, who wrote it heads each burst: anyone can pick
-                  // a name, so the end of their peer ID and any badge go with it
+                  peerName: author != null ? api.authorLabel(author) : _peerName,
+                  // In a channel, who wrote it heads each burst: just their
+                  // handle, unless another device uses it too, when the end of
+                  // their peer ID and a warning tell the two apart
                   author: author != null && m['isOutgoing'] != true && !continuesGroup(i, i - 1)
                       ? _AuthorLine(
                           peerId: author,
-                          name: api.displayName(author),
+                          name: api.authorLabel(author),
                           verified: api.isVerified(author),
-                          conflict: api.hasHandleConflict(author),
+                          shared: api.handleShared(author),
+                          impostor: api.hasHandleConflict(author),
                           onTap: () => showPeerIdentitySheet(context, author),
                         )
                       : null,
@@ -579,7 +581,7 @@ class _MessageBubble extends StatelessWidget {
     final semanticLabel = [
       isOut ? 'You' : peerName,
       if (author?.verified == true) 'verified contact',
-      if (author?.conflict == true) 'impersonation warning',
+      if (author != null && !author!.verified && (author!.shared || author!.impostor)) author!.warning,
       timeStr,
       if (isOut) delivery.word,
       content,
@@ -673,24 +675,36 @@ class _MessageBubble extends StatelessWidget {
 /// the end of their peer ID, which no one else can copy. Opens their identity.
 class _AuthorLine extends StatelessWidget {
   final String peerId;
+
+  /// From [ApplicationAPI.authorLabel]: '@handle', with an ID suffix only
+  /// when the handle is [shared].
   final String name;
   final bool verified;
-  final bool conflict;
+
+  /// Another device known here uses the same or a lookalike handle.
+  final bool shared;
+
+  /// This one is the later claimant, so possibly impersonating the other.
+  final bool impostor;
   final VoidCallback onTap;
 
   const _AuthorLine({
     required this.peerId,
     required this.name,
     required this.verified,
-    required this.conflict,
+    required this.shared,
+    required this.impostor,
     required this.onTap,
   });
+
+  /// What the amber mark says, when there is one.
+  String get warning => impostor ? 'impersonation warning' : 'another device uses this handle';
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final fg = ChatterColors.of(context).onBubbleIn;
-    final idTail = peerId.length > 6 ? '…${peerId.substring(peerId.length - 6)}' : peerId;
+    final flagged = !verified && (shared || impostor);
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(6),
@@ -699,21 +713,19 @@ class _AuthorLine extends StatelessWidget {
         children: [
           Padding(
             padding: const EdgeInsets.only(right: 6),
-            child: PeerAvatar(peerId: peerId, name: name, size: 20),
+            child: PeerAvatar(peerId: peerId, name: name.replaceFirst('@', ''), size: 20),
           ),
           Text(name, style: theme.textTheme.labelLarge!.copyWith(color: fg, fontWeight: FontWeight.w700)),
-          if (verified || conflict)
+          if (verified || flagged)
             Padding(
               padding: const EdgeInsets.only(left: 4),
-              child: TrustMark(verified: verified, conflict: conflict, size: 16),
+              child: TrustMark(
+                verified: verified,
+                conflict: flagged,
+                conflictLabel: '${warning[0].toUpperCase()}${warning.substring(1)}',
+                size: 16,
+              ),
             ),
-          Padding(
-            padding: const EdgeInsets.only(left: 6),
-            child: Text(
-              idTail,
-              style: theme.textTheme.bodySmall!.copyWith(color: fg.withValues(alpha: 0.78), fontFamily: 'monospace'),
-            ),
-          ),
         ],
       ),
     );

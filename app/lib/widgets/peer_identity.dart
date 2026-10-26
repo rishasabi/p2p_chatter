@@ -27,7 +27,16 @@ class TrustMark extends StatelessWidget {
   final bool conflict;
   final double size;
 
-  const TrustMark({super.key, required this.verified, required this.conflict, this.size = 18});
+  /// What a screen reader says for the warning sign.
+  final String conflictLabel;
+
+  const TrustMark({
+    super.key,
+    required this.verified,
+    required this.conflict,
+    this.size = 18,
+    this.conflictLabel = 'Impersonation warning',
+  });
 
   /// From an [ApplicationAPI.peerStatus] map.
   TrustMark.of(Map<String, dynamic> status, {Key? key, double size = 18})
@@ -40,7 +49,7 @@ class TrustMark extends StatelessWidget {
       return Icon(Icons.verified, size: size, color: chatter.verified, semanticLabel: 'Verified contact');
     }
     if (conflict) {
-      return Icon(Icons.warning_amber_rounded, size: size, color: chatter.warning, semanticLabel: 'Impersonation warning');
+      return Icon(Icons.warning_amber_rounded, size: size, color: chatter.warning, semanticLabel: conflictLabel);
     }
     return const SizedBox.shrink();
   }
