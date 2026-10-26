@@ -25,6 +25,7 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
   late bool _bgSync = _settings.getBool(SettingsStore.backgroundSync, fallback: true);
   late bool _publishToDHT = _settings.getBool(SettingsStore.publishToDht, fallback: false);
   late bool _readReceipts = _settings.getBool(SettingsStore.readReceipts, fallback: true);
+  late bool _linkPreviews = _settings.getBool(SettingsStore.linkPreviews, fallback: true);
   bool _isBackendOnline = false;
   // Until the first health check answers, don't claim the node is offline
   bool _isChecking = true;
@@ -185,6 +186,16 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
             onChanged: (val) {
               setState(() => _readReceipts = val);
               _settings.set(SettingsStore.readReceipts, val);
+            },
+          ),
+          SwitchListTile(
+            title: const Text('Link previews'),
+            subtitle: const Text('Fetch a title and picture for links in messages when there\'s internet. '
+                'The site can see your IP address.'),
+            value: _linkPreviews,
+            onChanged: (val) {
+              setState(() => _linkPreviews = val);
+              _settings.set(SettingsStore.linkPreviews, val);
             },
           ),
           SwitchListTile(

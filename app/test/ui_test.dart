@@ -1,10 +1,14 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import 'package:app/application_api.dart';
@@ -24,9 +28,12 @@ import 'package:app/services/ble_service.dart';
 import 'package:app/services/custom_theme_store.dart';
 import 'package:app/services/draft_store.dart';
 import 'package:app/services/embedded_node_service.dart';
+import 'package:app/services/link_preview_service.dart';
 import 'package:app/services/local_store.dart';
+import 'package:app/services/settings_store.dart';
 import 'package:app/theme/app_theme.dart';
 import 'package:app/theme/custom_theme.dart';
+import 'package:app/widgets/link_preview_card.dart';
 import 'package:app/widgets/mesh_map.dart';
 import 'package:app/widgets/message_text.dart';
 import 'package:app/widgets/time_format.dart';
@@ -66,6 +73,7 @@ ChatMessage incoming(String from, String id, String content, DateTime at, {Strin
 void main() {
   LocalStore.isTestMode = true;
   EmbeddedNodeService.isTestMode = true;
+  LinkPreviewService.isTestMode = true;
 
   group('Theme', () {
     for (final (name, theme) in [('light', AppTheme.light()), ('dark', AppTheme.dark())]) {
@@ -584,6 +592,223 @@ void main() {
             handle: 'someone_with_a_long'));
         await tester.pumpWidget(host(const ChatScreen(peerName: 'x', peerId: peer), mode: mode, textScale: 2));
         await tester.pump();
+        expect(tester.takeException(), isNull);
+        await tester.pump(const Duration(seconds: 1));
+      });
+    }
+  });
+
+  group('Link previews', () {
+    setUp(() => ApplicationAPI().stopPolling());
+    tearDown(() {
+      LinkPreviewService.debugClient = null;
+      LinkPreviewService.debugLookup = null;
+    });
+
+    // Every name resolves to a public address unless [dns] says otherwise
+    void fakeInternet(Future<http.Response> Function(http.Request request) handler,
+        {Map<String, String> dns = const {}, List<Uri>? requested}) {
+      LinkPreviewService.debugClient = MockClient((request) {
+        requested?.add(request.url);
+        return handler(request);
+      });
+      LinkPreviewService.debugLookup = (host) async => [InternetAddress(dns[host] ?? '93.184.216.34')];
+    }
+
+    const page = '''<html><head>
+      <title>Ignored when OpenGraph has one</title>
+      <meta property="og:title" content="Shelters &amp; water points">
+      <meta property="og:site_name" content="Relief Map">
+      <meta name="description" content="Fallback description">
+      <meta property="og:description" content='Open now: school gym, &quot;Hall B&quot;, the library.'>
+      <meta property="og:image" content="/img/map.png">
+      </head><body>...</body></html>''';
+
+    test('the first web link is found, in Markdown or written out, without trailing punctuation', () {
+      expect(firstWebLink('Shelter map: https://relief.example/map?zone=4.')!.url.toString(),
+          'https://relief.example/map?zone=4');
+      expect(firstWebLink('see www.redcross.org, now')!.url.toString(), 'https://www.redcross.org');
+      final md = firstWebLink('read [the guide](https://civil.example/guide) and https://second.example')!;
+      expect(md.url.host, 'civil.example');
+      expect(md.text, 'the guide');
+      expect(firstWebLink('(https://en.wikipedia.org/wiki/Mesh_(network))')!.url.path, '/wiki/Mesh_(network)');
+      expect(firstWebLink('ftp://files.example/x or mailto:a@b.example'), isNull);
+      expect(firstWebLink('no links here'), isNull);
+    });
+
+    test('links whose words name another site, or that use look-alike characters, are caught', () {
+      expect(firstWebLink('[redcross.org](https://evil.example/donate)')!.claimedHost, 'redcross.org');
+      expect(firstWebLink('[https://redcross.org/x](https://redcross.org.evil.example)')!.claimedHost, 'redcross.org');
+      expect(firstWebLink('[redcross.org](https://www.redcross.org/donate)')!.claimedHost, isNull);
+      expect(firstWebLink('[the form](https://evil.example)')!.claimedHost, isNull);
+      expect(isUnusualHost('xn--pple-43d.com'), isTrue);
+      expect(isUnusualHost(Uri.parse('https://аpple.com').host), isTrue); // a Cyrillic a
+      expect(isUnusualHost('apple.com'), isFalse);
+    });
+
+    test('only public internet addresses are fetched from', () {
+      for (final local in [
+        '127.0.0.1', '10.1.2.3', '172.20.0.1', '192.168.43.1', '100.64.0.1', '169.254.1.1', '0.0.0.0', //
+        '::1', 'fd00::1', 'fe80::1', '::ffff:192.168.0.1',
+      ]) {
+        expect(isPublicAddress(InternetAddress(local)), isFalse, reason: local);
+      }
+      for (final public in ['93.184.216.34', '1.1.1.1', '2606:4700:4700::1111']) {
+        expect(isPublicAddress(InternetAddress(public)), isTrue, reason: public);
+      }
+    });
+
+    test('OpenGraph tags are read, with entities decoded and the image made absolute', () {
+      final preview = parseLinkPreview(page, Uri.parse('https://relief.example/map'));
+      expect(preview.title, 'Shelters & water points');
+      expect(preview.description, 'Open now: school gym, "Hall B", the library.');
+      expect(preview.siteName, 'Relief Map');
+      expect(preview.image.toString(), 'https://relief.example/img/map.png');
+
+      // No OpenGraph: the title, the meta description and the page icon
+      final plain = parseLinkPreview(
+        '<title> Civil  defence\n guide </title><meta name="description" content="Steps to take">'
+        '<link rel="icon" href="favicon.png">',
+        Uri.parse('https://civil.example/guide/'),
+      );
+      expect(plain.title, 'Civil defence guide');
+      expect(plain.description, 'Steps to take');
+      expect(plain.image.toString(), 'https://civil.example/guide/favicon.png');
+    });
+
+    test('a preview is fetched once, then served from the cache', () async {
+      final requested = <Uri>[];
+      fakeInternet((r) async => http.Response(page, 200, headers: {'content-type': 'text/html; charset=utf-8'}),
+          requested: requested);
+      final url = Uri.parse('https://relief.example/cache-test');
+      expect((await LinkPreviewService().preview(url)).title, 'Shelters & water points');
+      expect((await LinkPreviewService().preview(url)).title, 'Shelters & water points');
+      expect(requested, [url]);
+    });
+
+    test('redirects are followed hop by hop and a change of site is reported', () async {
+      fakeInternet((r) async => r.url.host == 'short.example'
+          ? http.Response('', 302, headers: {'location': 'https://landing.example/page'})
+          : http.Response(page, 200, headers: {'content-type': 'text/html'}));
+      final preview = await LinkPreviewService().preview(Uri.parse('https://short.example/abc'));
+      expect(preview.redirectHost, 'landing.example');
+    });
+
+    test('nothing on this phone or its network is ever requested, even through a redirect', () async {
+      final requested = <Uri>[];
+      fakeInternet(
+        (r) async => r.url.host == 'hop.example'
+            ? http.Response('', 302, headers: {'location': 'http://router.example/admin'})
+            : http.Response(page, 200, headers: {'content-type': 'text/html'}),
+        dns: {'router.example': '192.168.1.1'},
+        requested: requested,
+      );
+      for (final url in [
+        'http://127.0.0.1:8080/messages', // this phone's own node
+        'http://localhost/',
+        'https://printer.local/',
+        'https://relief.example:8443/',
+        'https://hop.example/go',
+      ]) {
+        await expectLater(LinkPreviewService().preview(Uri.parse(url)), throwsA(LinkPreviewFailure.none), reason: url);
+      }
+      expect(requested.map((u) => u.host), ['hop.example']);
+    });
+
+    testWidgets('a link in a chat gets a card naming its site, filled in once fetched, that asks before opening',
+        (tester) async {
+      await setScreen(tester, const Size(390, 900));
+      const pixel = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+      fakeInternet((r) async => r.url.path.endsWith('.png')
+          ? http.Response.bytes(base64Decode(pixel), 200, headers: {'content-type': 'image/png'})
+          : http.Response(page, 200, headers: {'content-type': 'text/html'}));
+      final api = ApplicationAPI()..stopPolling();
+      const peer = '12D3KooWUiLinkPreview';
+      api.receiveFromNode(
+          incoming(peer, 'lp-1', 'Water points: https://relief.example/chat-card', DateTime.now(), handle: 'medic'));
+      await tester.pumpWidget(host(const ChatScreen(peerName: 'medic', peerId: peer)));
+      await tester.pump();
+
+      // The site shows at once, before anything is fetched
+      final card = find.byType(LinkPreviewCard);
+      expect(find.descendant(of: card, matching: find.text('relief.example')), findsOneWidget);
+      // The mock's response body arrives on the real event loop, page then picture
+      for (var i = 0; i < 2; i++) {
+        await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+        await tester.pump();
+      }
+      expect(find.text('Shelters & water points'), findsOneWidget);
+      expect(find.text('Open now: school gym, "Hall B", the library.'), findsOneWidget);
+      expect(find.descendant(of: card, matching: find.byType(Image)), findsOneWidget);
+
+      await tester.tap(find.text('Shelters & water points'));
+      await tester.pumpAndSettle();
+      expect(find.text('Open link?'), findsOneWidget);
+      expect(find.text('Goes to'), findsOneWidget);
+      expect(find.descendant(of: find.byType(AlertDialog), matching: find.text('relief.example')), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(seconds: 1));
+    });
+
+    testWidgets('offline, the card says so after the 5-second limit and still names the site', (tester) async {
+      await setScreen(tester, const Size(390, 900));
+      fakeInternet((r) => Completer<http.Response>().future); // a connection that never answers
+      final api = ApplicationAPI()..stopPolling();
+      const peer = '12D3KooWUiLinkOffline';
+      api.receiveFromNode(
+          incoming(peer, 'lo-1', 'Guide: https://civil.example/guide/evacuation', DateTime.now(), handle: 'medic'));
+      await tester.pumpWidget(host(const ChatScreen(peerName: 'medic', peerId: peer)));
+      await tester.pump();
+      expect(find.text('Loading preview…'), findsOneWidget);
+      expect(find.text('civil.example'), findsOneWidget);
+
+      await tester.pump(LinkPreviewService.timeout + const Duration(milliseconds: 100));
+      await tester.pump();
+      expect(find.text('Offline preview unavailable'), findsOneWidget);
+      expect(find.text('/guide/evacuation'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(seconds: 1));
+    });
+
+    testWidgets('a link whose words name another site is flagged on the card and in the dialog', (tester) async {
+      await setScreen(tester, const Size(390, 900));
+      // With previews off, nothing is fetched at all
+      SettingsStore().set(SettingsStore.linkPreviews, false);
+      addTearDown(() => SettingsStore().set(SettingsStore.linkPreviews, true));
+      final requested = <Uri>[];
+      fakeInternet((r) async => http.Response(page, 200, headers: {'content-type': 'text/html'}), requested: requested);
+      final api = ApplicationAPI()..stopPolling();
+      const peer = '12D3KooWUiLinkPhish';
+      api.receiveFromNode(incoming(peer, 'ph-1', 'Donate here: [redcross.org](https://evil.example/pay)', DateTime.now()));
+      await tester.pumpWidget(host(const ChatScreen(peerName: 'stranger', peerId: peer)));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Web link'), findsOneWidget);
+      expect(find.text('The link says redcross.org but goes to evil.example'), findsOneWidget);
+      expect(requested, isEmpty);
+
+      await tester.tap(find.descendant(of: find.byType(LinkPreviewCard), matching: find.text('evil.example')));
+      await tester.pumpAndSettle();
+      expect(find.text('Open link?'), findsOneWidget);
+      expect(find.text('The link says redcross.org, but it goes to evil.example.'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(seconds: 1));
+    });
+
+    for (final mode in [ThemeMode.light, ThemeMode.dark]) {
+      testWidgets('cards lay out at 320px wide with 2x text in ${mode.name} mode', (tester) async {
+        await setScreen(tester, const Size(320, 640));
+        final api = ApplicationAPI()..stopPolling();
+        final peer = '12D3KooWUiLinkLayout${mode.name}';
+        api.receiveFromNode(incoming(peer, 'll-${mode.name}',
+            'https://a-rather-long-subdomain.relief-coordination.example/shelters/north?zone=4', DateTime.now()));
+        await tester.pumpWidget(host(ChatScreen(peerName: 'medic', peerId: peer), mode: mode, textScale: 2));
+        await tester.pump();
+        expect(find.byType(LinkPreviewCard), findsOneWidget);
         expect(tester.takeException(), isNull);
         await tester.pump(const Duration(seconds: 1));
       });

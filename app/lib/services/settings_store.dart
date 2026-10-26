@@ -11,6 +11,7 @@ class SettingsStore {
   static const readReceipts = 'readReceipts';
   static const backgroundSync = 'backgroundSync';
   static const publishToDht = 'publishToDht';
+  static const linkPreviews = 'linkPreviews';
 
   Map<String, dynamic> _values = {};
 

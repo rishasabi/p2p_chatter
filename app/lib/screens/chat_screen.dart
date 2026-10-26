@@ -4,8 +4,10 @@ import 'package:flutter/services.dart';
 import '../application_api.dart';
 import '../services/api_service.dart';
 import '../services/draft_store.dart';
+import '../services/link_preview_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/feedback.dart';
+import '../widgets/link_preview_card.dart';
 import '../widgets/message_text.dart';
 import '../widgets/peer_display.dart';
 import '../widgets/peer_identity.dart';
@@ -546,6 +548,7 @@ class _MessageBubble extends StatelessWidget {
     final content = message['content'] as String? ?? '';
     final timeStr = formatClock(context, message['timestamp'] as DateTime);
     final delivery = _deliveryOf(message['status'] as String?);
+    final link = firstWebLink(content);
 
     final Color bg;
     final Color fg;
@@ -584,6 +587,7 @@ class _MessageBubble extends StatelessWidget {
       timeStr,
       if (isOut) delivery.word,
       content,
+      if (link != null) 'link to ${link.host}',
     ].join(', ');
 
     return Padding(
@@ -598,6 +602,9 @@ class _MessageBubble extends StatelessWidget {
             onLongPress: onCopy,
             customSemanticsActions: {
               if (author != null) const CustomSemanticsAction(label: 'Show who wrote it'): author!.onTap,
+              if (link != null)
+                CustomSemanticsAction(label: 'Open link to ${link.host}'): () =>
+                    openLinkWithConsent(context, link.url.toString(), text: link.text),
             },
             excludeSemantics: true,
             child: Material(
@@ -623,6 +630,10 @@ class _MessageBubble extends StatelessWidget {
                       children: [
                         if (author != null) ...[author!, const SizedBox(height: 4)],
                         MessageText(content, style: theme.textTheme.bodyLarge!.copyWith(color: fg)),
+                        if (link != null) ...[
+                          const SizedBox(height: 8),
+                          LinkPreviewCard(link: link, foreground: fg),
+                        ],
                         if (showMeta) ...[
                           const SizedBox(height: 4),
                           // Gaps are padding, not Wrap.spacing: Wrap leaves spacing

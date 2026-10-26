@@ -3,6 +3,8 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:url_launcher/url_launcher.dart';
 
+import '../services/link_preview_service.dart';
+import '../theme/app_theme.dart';
 import 'feedback.dart';
 
 /// Anything that could be Markdown: emphasis, code, headings, quotes, links,
@@ -35,7 +37,8 @@ class MessageText extends StatelessWidget {
       data: content,
       softLineBreak: true,
       extensionSet: md.ExtensionSet.gitHubFlavored,
-      onTapLink: (text, href, _) => openLinkWithConsent(context, href ?? text),
+      // The words go along so the dialog can catch text naming another site
+      onTapLink: (text, href, _) => openLinkWithConsent(context, href ?? text, text: text),
       // Nothing is fetched from the network: an image shows as its description
       imageBuilder: (uri, title, alt) => Text('[image: ${alt?.isNotEmpty == true ? alt : uri}]', style: style),
       // Code blocks wrap instead of scrolling sideways: a scroll view inside a
@@ -99,34 +102,71 @@ String markdownToPlain(String content) => content
 const _openableSchemes = {'http', 'https', 'mailto', 'tel', 'geo'};
 
 /// Asks before following a link from a message: it leaves Chatter, needs a
-/// connection, and could have been sent by anyone.
-Future<void> openLinkWithConsent(BuildContext context, String link) async {
+/// connection, and could have been sent by anyone. The site it really goes
+/// to is shown first and largest, with a warning when the link's [text]
+/// names another site, the address uses look-alike characters, or it isn't
+/// encrypted.
+Future<void> openLinkWithConsent(BuildContext context, String link, {String? text}) async {
   final withScheme = RegExp(r'^[a-z][a-z0-9+.-]*:', caseSensitive: false).hasMatch(link) ? link : 'https://$link';
   final uri = Uri.tryParse(withScheme);
   if (uri == null || !_openableSchemes.contains(uri.scheme.toLowerCase())) {
     showNotice(context, 'Chatter doesn\'t open this kind of link.', tone: NoticeTone.error);
     return;
   }
+  final web = uri.scheme == 'http' || uri.scheme == 'https';
+  final claimed = web ? claimedHostMismatch(text, uri) : null;
+  final warnings = [
+    if (claimed != null) 'The link says $claimed, but it goes to ${uri.host}.',
+    if (web && isUnusualHost(uri.host)) 'This address uses unusual characters: it may imitate another site.',
+    if (uri.scheme == 'http') 'This link isn\'t encrypted (http): others on the network could see or change the page.',
+  ];
 
   final choice = await showDialog<bool>(
     context: context,
-    builder: (context) => AlertDialog(
-      title: const Text('Open link?'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SelectableText(uri.toString(), style: const TextStyle(fontFamily: 'monospace')),
-          const SizedBox(height: 12),
-          const Text('It opens outside Chatter and may need an internet connection. '
-              'Only open links from people you trust.'),
+    builder: (context) {
+      final theme = Theme.of(context);
+      final chatter = ChatterColors.of(context);
+      return AlertDialog(
+        title: const Text('Open link?'),
+        scrollable: true,
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (web) ...[
+              Text('Goes to', style: theme.textTheme.labelMedium!.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+              const SizedBox(height: 2),
+              Text(uri.host, style: theme.textTheme.titleLarge),
+              const SizedBox(height: 12),
+            ],
+            for (final warning in warnings)
+              Container(
+                margin: const EdgeInsets.only(bottom: 10),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(color: chatter.warningContainer, borderRadius: BorderRadius.circular(10)),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.warning_amber_rounded, size: 20, color: chatter.onWarningContainer),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(warning, style: theme.textTheme.bodyMedium!.copyWith(color: chatter.onWarningContainer)),
+                    ),
+                  ],
+                ),
+              ),
+            SelectableText(uri.toString(), style: const TextStyle(fontFamily: 'monospace')),
+            const SizedBox(height: 12),
+            const Text('It opens outside Chatter and may need an internet connection. '
+                'Only open links from people you trust.'),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Open')),
         ],
-      ),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-        FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Open')),
-      ],
-    ),
+      );
+    },
   );
   if (choice != true || !context.mounted) return;
 
