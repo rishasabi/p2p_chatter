@@ -170,8 +170,8 @@ class ApplicationAPI {
       }
     }
     await _shareIdentity(info);
-    // Private channels first, so posts waiting for one can be resent
-    await _rejoinPrivateChannels();
+    // Channels first, so posts waiting for a private one can be resent
+    await _rejoinChannels();
     unawaited(_resendUndelivered());
 
     if (Platform.isAndroid) {
@@ -859,9 +859,10 @@ class ApplicationAPI {
 
   void _saveChannels() => LocalStore.write('channels.json', {'channels': _channels});
 
-  /// The node forgets private rooms' keys when it stops; hand them back.
-  Future<void> _rejoinPrivateChannels() async {
-    for (final c in _channels.where((c) => c['private'] == true).toList()) {
+  /// The node forgets which rooms we're in (and private rooms' keys) when
+  /// it stops; tell it again, which also has it catch up on each.
+  Future<void> _rejoinChannels() async {
+    for (final c in _channels.toList()) {
       try {
         await _service.joinRoom(c['name'] as String, passphrase: c['passphrase'] as String?);
       } catch (e) {
@@ -878,9 +879,16 @@ class ApplicationAPI {
     final problem = validateChannelName(n);
     if (problem != null) throw ArgumentError(problem);
     final private = passphrase != null && passphrase.isNotEmpty;
-    // An open room needs nothing from the node, which relays and delivers
-    // every one; a private room's ID comes from the key the node derives
-    final id = private ? await _service.joinRoom(n, passphrase: passphrase) : n;
+    // A private room's ID comes from the key the node derives. An open room
+    // is joined here even with the node down: it relays and delivers every
+    // room, and telling it only starts the catch-up on recent posts
+    final String id;
+    if (private) {
+      id = await _service.joinRoom(n, passphrase: passphrase);
+    } else {
+      id = n;
+      unawaited(_service.joinRoom(n).then((_) {}, onError: (Object e) => debugPrint('Could not tell the node about #$n: $e')));
+    }
     final conversation = channelConversation(id);
     if (_channelFor(conversation) == null) {
       _channels.add({'id': id, 'name': n, 'private': private, if (private) 'passphrase': passphrase});
@@ -890,20 +898,23 @@ class ApplicationAPI {
     return channelStatus(conversation)!;
   }
 
-  /// Leaves a channel. Its messages are still relayed for others; they're
-  /// just no longer shown here (or, for a private one, readable).
+  /// Leaves a channel: the node stops catching up on it (and forgets a
+  /// private one's key). Its messages are still relayed for others; they're
+  /// just no longer shown or kept here.
   Future<void> leaveChannel(String conversationId) async {
     final c = _channelFor(conversationId);
     if (c == null) return;
     _channels.remove(c);
     _saveChannels();
     _notifyHistory(conversationId);
+    final leaving = _service.leaveRoom(c['id'] as String).catchError((Object e) {
+      debugPrint('Could not tell the node we left #${c['name']}: $e');
+    });
+    // A private room's key must be gone before we say it's left
     if (c['private'] == true) {
-      try {
-        await _service.leaveRoom(c['id'] as String);
-      } catch (e) {
-        debugPrint('Could not tell the node we left #${c['name']}: $e');
-      }
+      await leaving;
+    } else {
+      unawaited(leaving);
     }
   }
 
@@ -912,7 +923,8 @@ class ApplicationAPI {
     if (_channelFor(conversation) == null) return; // not joined: relayed by the node, not shown
     final handle = msg.handle != null && validateHandle(msg.handle!) == null ? msg.handle : null;
     _rememberContact(msg.from, handle: handle, inChannel: true);
-    if (msg.isRelayed) _relayedSeen[msg.from] = DateTime.now();
+    // A post from history says nothing about whether its author is around now
+    if (msg.isRelayed && !msg.isHistory) _relayedSeen[msg.from] = DateTime.now();
     _addMessage({
       'id': id,
       'peerId': conversation,
@@ -984,7 +996,15 @@ class ApplicationAPI {
   void _addMessage(Map<String, dynamic> message) {
     final peerId = message['peerId'] as String;
     _messageIndex[message['id'] as String] = message;
-    _history.putIfAbsent(peerId, () => []).add(message);
+    // In the order they were written: posts caught up from history, or
+    // carried for a while, arrive after newer ones
+    final list = _history.putIfAbsent(peerId, () => []);
+    final at = message['timestamp'] as DateTime;
+    var i = list.length;
+    while (i > 0 && (list[i - 1]['timestamp'] as DateTime).isAfter(at)) {
+      i--;
+    }
+    list.insert(i, message);
     unawaited(_chatStore.save(message));
     _notifyHistory(peerId);
   }

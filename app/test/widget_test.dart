@@ -276,6 +276,51 @@ void main() {
           handle: handle,
         );
 
+    test('channel posts caught up from history slot in by when they were written', () async {
+      final api = ApplicationAPI()..stopPolling();
+      await api.joinChannel('catch-up');
+      const room = 'room:catch-up';
+      const author = '12D3KooWHistoryAuthor';
+      final now = DateTime.now().toUtc();
+      ChatMessage post(String id, String content, DateTime at, {bool history = false}) => ChatMessage.fromJson({
+            'id': 0,
+            'from': author,
+            'content': content,
+            'timestamp': at.toIso8601String(),
+            'msg_id': id,
+            'handle': 'triage_lead',
+            'via': '12D3KooWHistoryNeighbour',
+            'room': 'catch-up',
+            if (history) 'history': true,
+          });
+
+      api.receiveFromNode(post('cu-3', 'now: tent 4 full', now));
+      api.receiveFromNode(post('cu-1', 'earlier: open tent 4', now.subtract(const Duration(hours: 2)), history: true));
+      api.receiveFromNode(post('cu-2', 'later: tent 4 filling', now.subtract(const Duration(hours: 1)), history: true));
+      api.receiveFromNode(post('cu-1', 'earlier: open tent 4', now.subtract(const Duration(hours: 2)), history: true));
+
+      expect(api.historyFor(room).map((m) => m['id']), ['cu-1', 'cu-2', 'cu-3']); // once each, in order
+      expect(post('x', '', now, history: true).isHistory, isTrue);
+    });
+
+    test('a post from history doesn\'t make its author look reachable', () async {
+      final api = ApplicationAPI()..stopPolling();
+      await api.joinChannel('old-news');
+      const author = '12D3KooWHistoryAbsent';
+      api.receiveFromNode(ChatMessage.fromJson({
+        'id': 0,
+        'from': author,
+        'content': 'posted this morning',
+        'timestamp': DateTime.now().subtract(const Duration(hours: 5)).toUtc().toIso8601String(),
+        'msg_id': 'on-1',
+        'via': '12D3KooWHistoryNeighbour',
+        'room': 'old-news',
+        'history': true,
+      }));
+      expect(api.historyFor('room:old-news'), hasLength(1));
+      expect(api.peerStatus(author)['mesh'], isFalse);
+    });
+
     test('message received with no chat open is kept in history, once', () {
       final api = ApplicationAPI()..stopPolling();
       api.receiveFromNode(fromNode('12D3KooWBtPeer', 'm-1', 'over the air', handle: 'dave'));

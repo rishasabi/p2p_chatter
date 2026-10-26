@@ -21,6 +21,11 @@ class ChatMessage {
   /// tag), or null for a direct message.
   final String? room;
 
+  /// A channel post caught up from a neighbour's history after joining (or
+  /// meeting someone new), not received as it was sent; [timestamp] is then
+  /// when its author wrote it.
+  final bool isHistory;
+
   const ChatMessage({
     required this.id,
     required this.from,
@@ -31,6 +36,7 @@ class ChatMessage {
     this.handle,
     this.via,
     this.room,
+    this.isHistory = false,
   });
 
   factory ChatMessage.fromJson(Map<String, dynamic> json) => ChatMessage(
@@ -42,6 +48,7 @@ class ChatMessage {
         handle: json['handle'] as String?,
         via: json['via'] as String?,
         room: (json['room'] as String?)?.isEmpty == true ? null : json['room'] as String?,
+        isHistory: json['history'] == true,
       );
 
   /// Whether another peer relayed this message to us.
