@@ -54,6 +54,8 @@ flutter:
   assets:
     - assets/fonts/OFL-Unbounded.txt
     - assets/fonts/OFL-Figtree.txt
+    # Alert sounds, made by tool/make_sounds.dart
+    - assets/sounds/
 
   # Both under the SIL Open Font License (see assets/fonts/OFL-*.txt). Bundled
   # rather than fetched: Chatter has to work with no internet at all.

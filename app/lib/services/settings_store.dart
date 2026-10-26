@@ -18,6 +18,7 @@ class SettingsStore {
   static const publishToDht = 'publishToDht';
   static const linkPreviews = 'linkPreviews';
   static const chatViewMode = 'chatViewMode';
+  static const alertSound = 'alertSound';
 
   Map<String, dynamic> _values = {};
 

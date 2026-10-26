@@ -18,10 +18,15 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.media.AudioAttributes
+import android.media.AudioManager
+import android.media.RingtoneManager
+import android.media.SoundPool
 import android.os.Build
 import android.os.Bundle
 import android.os.ParcelUuid
 import android.util.Log
+import io.flutter.FlutterInjector
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -297,7 +302,18 @@ class MainActivity : FlutterActivity() {
                         call.argument<String>("peerId") ?: "",
                         call.argument<String>("title") ?: "Chatter",
                         call.argument<String>("body") ?: "",
+                        call.argument<Boolean>("silent") ?: false,
                     )
+                    result.success(null)
+                }
+
+                "playSound" -> {
+                    playSound(call.argument<String>("asset") ?: "")
+                    result.success(null)
+                }
+
+                "playSystemSound" -> {
+                    playSystemSound()
                     result.success(null)
                 }
 
@@ -307,13 +323,22 @@ class MainActivity : FlutterActivity() {
     }
 
     // One notification per conversation (tagged by peer ID), replaced by the
-    // newest message; tapping it brings the app back.
-    private fun showMessageNotification(peerId: String, title: String, body: String) {
+    // newest message; tapping it brings the app back. Silent when the app
+    // plays its own alert sound: a channel's sound can't change once made, so
+    // those go on a second channel that only vibrates.
+    private fun showMessageNotification(peerId: String, title: String, body: String, silent: Boolean) {
         val manager = getSystemService(NotificationManager::class.java) ?: return
+        val channelId = if (silent) "messages_app_sound" else "messages"
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            manager.createNotificationChannel(
-                NotificationChannel("messages", "Messages", NotificationManager.IMPORTANCE_HIGH)
-            )
+            val channel = if (silent) {
+                NotificationChannel(channelId, "Messages (Chatter's alert sound)", NotificationManager.IMPORTANCE_HIGH).apply {
+                    setSound(null, null)
+                    enableVibration(true)
+                }
+            } else {
+                NotificationChannel(channelId, "Messages", NotificationManager.IMPORTANCE_HIGH)
+            }
+            manager.createNotificationChannel(channel)
         }
         val open = PendingIntent.getActivity(
             this, 0,
@@ -321,7 +346,7 @@ class MainActivity : FlutterActivity() {
             PendingIntent.FLAG_IMMUTABLE,
         )
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, "messages")
+            Notification.Builder(this, channelId)
         } else {
             @Suppress("DEPRECATION") Notification.Builder(this)
         }
@@ -338,6 +363,52 @@ class MainActivity : FlutterActivity() {
             manager.notify(peerId, 1, notification)
         } catch (e: SecurityException) {
             Log.w(TAG, "Notifications not allowed: ${e.message}")
+        }
+    }
+
+    // Alert sounds play through SoundPool: short clips, already decoded once
+    // loaded, so they start at once without holding up the UI.
+    private var soundPool: SoundPool? = null
+    private val soundIds = mutableMapOf<String, Int>()
+
+    // Whether the phone is set to ring: on vibrate or silent, an alert is the
+    // notification's vibration alone.
+    private fun ringerOn(): Boolean =
+        getSystemService(AudioManager::class.java)?.ringerMode == AudioManager.RINGER_MODE_NORMAL
+
+    // Plays a Flutter asset such as "assets/sounds/chime_default.wav".
+    private fun playSound(asset: String) {
+        if (asset.isEmpty() || !ringerOn()) return
+        val pool = soundPool ?: SoundPool.Builder()
+            .setMaxStreams(2)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_EVENT)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .build()
+            )
+            .build()
+            .also { pool ->
+                // The first time a sound is asked for, it plays once loaded
+                pool.setOnLoadCompleteListener { p, id, status -> if (status == 0) p.play(id, 1f, 1f, 1, 0, 1f) }
+                soundPool = pool
+            }
+        soundIds[asset]?.let { pool.play(it, 1f, 1f, 1, 0, 1f); return }
+        try {
+            val key = FlutterInjector.instance().flutterLoader().getLookupKeyForAsset(asset)
+            assets.openFd(key).use { fd -> soundIds[asset] = pool.load(fd, 1) }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not play $asset: $e")
+        }
+    }
+
+    // The phone's own notification sound, for previewing "System default".
+    private fun playSystemSound() {
+        if (!ringerOn()) return
+        try {
+            RingtoneManager.getRingtone(this, RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION))?.play()
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not play the system sound: $e")
         }
     }
 
@@ -484,6 +555,9 @@ class MainActivity : FlutterActivity() {
         try {
             unregisterReceiver(bluetoothStateReceiver)
         } catch (_: Exception) {}
+        soundPool?.release()
+        soundPool = null
+        soundIds.clear()
         // Don't leave an advertisement pointing at server sockets that are about to close
         stopAdvertisingInternal()
         stopServers()

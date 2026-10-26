@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../application_api.dart';
 import '../models/node_info.dart';
 import '../providers/theme_provider.dart';
+import '../services/alert_sounds.dart';
 import '../services/settings_store.dart';
 import '../theme/app_theme.dart';
 import '../widgets/feedback.dart';
@@ -26,6 +27,7 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
   late bool _publishToDHT = _settings.getBool(SettingsStore.publishToDht, fallback: false);
   late bool _readReceipts = _settings.getBool(SettingsStore.readReceipts, fallback: true);
   late bool _linkPreviews = _settings.getBool(SettingsStore.linkPreviews, fallback: true);
+  AlertSound _alertSound = AlertSound.current;
   bool _isBackendOnline = false;
   // Until the first health check answers, don't claim the node is offline
   bool _isChecking = true;
@@ -203,6 +205,35 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
                 : 'Pick colours, or import a theme your team shared'),
             trailing: const Icon(Icons.chevron_right),
             onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ThemeEditorScreen())),
+          ),
+
+          const _SectionHeader('Notification sounds'),
+          // Picking one plays it, so the choice can be heard first
+          RadioGroup<AlertSound>(
+            groupValue: _alertSound,
+            onChanged: (sound) {
+              if (sound == null) return;
+              setState(() => _alertSound = sound);
+              AlertSound.choose(sound);
+              sound.play(preview: true);
+            },
+            child: Column(
+              children: [
+                for (final sound in AlertSound.values)
+                  RadioListTile<AlertSound>(
+                    value: sound,
+                    title: Text(sound.label),
+                    subtitle: Text(sound.description),
+                    secondary: sound == AlertSound.vibrate
+                        ? null
+                        : IconButton(
+                            icon: const Icon(Icons.play_circle_outline),
+                            tooltip: 'Play ${sound.label}',
+                            onPressed: () => sound.play(preview: true),
+                          ),
+                  ),
+              ],
+            ),
           ),
 
           const _SectionHeader('Privacy and sync'),

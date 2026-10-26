@@ -133,12 +133,41 @@ class BleService {
 
   /// Posts a system notification for a message from [peerId]. Here because
   /// this is the app's one native channel.
-  Future<void> showMessageNotification({required String peerId, required String title, required String body}) async {
+  /// With [silent], the notification only vibrates: the app plays its own
+  /// alert sound (see [playSound]).
+  Future<void> showMessageNotification({
+    required String peerId,
+    required String title,
+    required String body,
+    bool silent = false,
+  }) async {
     if (!Platform.isAndroid) return;
     try {
-      await _advertiserChannel.invokeMethod('showMessageNotification', {'peerId': peerId, 'title': title, 'body': body});
+      await _advertiserChannel.invokeMethod(
+          'showMessageNotification', {'peerId': peerId, 'title': title, 'body': body, 'silent': silent});
     } catch (e) {
       debugPrint('Could not show notification: $e');
+    }
+  }
+
+  /// Plays a short sound bundled with the app, e.g. 'assets/sounds/chime_default.wav'.
+  /// Nothing plays while the phone is on silent or vibrate.
+  Future<void> playSound(String asset) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _advertiserChannel.invokeMethod('playSound', {'asset': asset});
+    } catch (e) {
+      debugPrint('Could not play $asset: $e');
+    }
+  }
+
+  /// Plays the phone's own notification sound.
+  Future<void> playSystemSound() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _advertiserChannel.invokeMethod('playSystemSound');
+    } catch (e) {
+      debugPrint('Could not play the system sound: $e');
     }
   }
 

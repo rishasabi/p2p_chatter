@@ -12,6 +12,7 @@ import 'screens/initialization_screen.dart';
 import 'screens/mesh_screen.dart';
 import 'screens/nearby_screen.dart';
 import 'screens/node_settings_screen.dart';
+import 'services/alert_sounds.dart';
 import 'services/ble_service.dart';
 import 'services/custom_theme_store.dart';
 import 'services/draft_store.dart';
@@ -136,11 +137,16 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     final looking = WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed &&
         ChatScreen.visiblePeerId == from;
     if (looking) return;
+    // The chosen alert sound, with the notification's vibration; neither
+    // waits on the other, so nothing on screen is held up
+    final sound = AlertSound.current;
     BleService().showMessageNotification(
       peerId: from,
       title: _api.displayName(from),
       body: markdownToPlain(message['content'] as String),
+      silent: sound.notificationSilent,
     );
+    sound.play();
   }
 
   void _select(int index) {

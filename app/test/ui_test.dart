@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -24,6 +25,7 @@ import 'package:app/screens/node_settings_screen.dart';
 import 'package:app/screens/theme_editor_screen.dart';
 import 'package:app/screens/wifi_qr_screen.dart';
 import 'package:app/services/api_service.dart';
+import 'package:app/services/alert_sounds.dart';
 import 'package:app/services/ble_service.dart';
 import 'package:app/services/custom_theme_store.dart';
 import 'package:app/services/draft_store.dart';
@@ -912,6 +914,51 @@ void main() {
         await tester.pump(const Duration(seconds: 1));
       });
     }
+  });
+
+  group('Notification sounds', () {
+    setUp(() => ApplicationAPI().stopPolling());
+    tearDown(() => AlertSound.choose(AlertSound.chime));
+
+    testWidgets('every alert sound ships as a short WAV the app can play', (tester) async {
+      for (final sound in AlertSound.values.where((s) => s.asset != null)) {
+        final bytes = (await rootBundle.load(sound.asset!)).buffer.asByteData();
+        String tag(int at) => String.fromCharCodes(bytes.buffer.asUint8List(at, 4));
+        expect(tag(0), 'RIFF', reason: sound.asset);
+        expect(tag(8), 'WAVE', reason: sound.asset);
+        expect(bytes.getUint16(20, Endian.little), 1, reason: '${sound.asset}: PCM');
+        expect(bytes.getUint16(34, Endian.little), 16, reason: '${sound.asset}: 16-bit');
+        final seconds = bytes.getUint32(40, Endian.little) / bytes.getUint32(28, Endian.little);
+        expect(seconds, inInclusiveRange(0.2, 1.5), reason: sound.asset);
+      }
+    });
+
+    test('only the system sound leaves the notification to make a sound', () {
+      expect(AlertSound.values.where((s) => !s.notificationSilent), [AlertSound.system]);
+      expect(AlertSound.current, AlertSound.chime); // the default
+    });
+
+    testWidgets('a sound is picked in Settings, and kept', (tester) async {
+      await setScreen(tester, const Size(390, 900));
+      await tester.pumpWidget(host(const NodeSettingsScreen()));
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.scrollUntilVisible(find.text('Urgent siren'), 200);
+      await tester.ensureVisible(find.text('Urgent siren'));
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Play Urgent siren'), findsOneWidget);
+      await tester.tap(find.text('Urgent siren'));
+      await tester.pump();
+      expect(AlertSound.current, AlertSound.siren);
+      expect(SettingsStore().getString(SettingsStore.alertSound), 'siren');
+
+      // A fresh Settings screen shows the saved choice
+      await tester.pumpWidget(host(const NodeSettingsScreen(key: ValueKey('again'))));
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.scrollUntilVisible(find.text('Urgent siren'), 200);
+      final selected = tester.widget<RadioGroup<AlertSound>>(find.byType(RadioGroup<AlertSound>));
+      expect(selected.groupValue, AlertSound.siren);
+      expect(tester.takeException(), isNull);
+    });
   });
 
   group('Chats list', () {
