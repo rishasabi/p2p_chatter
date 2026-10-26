@@ -1,0 +1,99 @@
+name: Android APKs
+
+# Every pull request and push to main builds the APKs. A push to main also
+# publishes them as release v<version>, taken from app/pubspec.yaml, unless
+# that version is already released.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: service/go.mod
+          cache-dependency-path: service/go.sum
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.7
+          channel: stable
+          cache: true
+
+      # Built from the pinned submodule rather than the committed .so files,
+      # so every ABI (armeabi-v7a has none committed) matches the service.
+      - name: Build libchatter.so
+        working-directory: service
+        run: |
+          bin=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
+          build() {
+            mkdir -p ../app/android/app/src/main/jniLibs/$1
+            CGO_ENABLED=1 GOOS=android GOARCH=$2 GOARM=7 CC=$bin/$3-clang \
+              go build -buildmode=c-shared -trimpath -ldflags="-s -w -checklinkname=0" \
+              -o ../app/android/app/src/main/jniLibs/$1/libchatter.so ./embedded
+          }
+          build armeabi-v7a arm armv7a-linux-androideabi24
+          build arm64-v8a arm64 aarch64-linux-android24
+          build x86_64 amd64 x86_64-linux-android24
+
+      - name: Set up the upload key
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE" ]; then
+            echo "::warning::No upload key in secrets: these APKs are signed with a throwaway debug key and won't install over another release"
+            exit 0
+          fi
+          echo "$KEYSTORE" | base64 -d > android/app/upload-keystore.jks
+          printf 'storeFile=upload-keystore.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$STORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > android/key.properties
+
+      - name: Build APKs
+        run: flutter build apk --release --target-platform android-arm,android-arm64,android-x64 --split-per-abi --obfuscate --split-debug-info=build/symbols
+
+      - name: Name APKs by version
+        run: |
+          version=$(sed -n 's/^version: *\([^+[:space:]]*\).*/\1/p' pubspec.yaml)
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          mkdir dist
+          for apk in build/app/outputs/flutter-apk/app-*-release.apk; do
+            abi=${apk##*/app-}
+            mv "$apk" "dist/chatter-$version-${abi%-release.apk}.apk"
+          done
+          # Needed to read stack traces from these builds (flutter symbolize).
+          (cd build/symbols && zip -qr "../../dist/chatter-$version-debug-symbols.zip" .)
+          ls -l dist
+
+      - name: Publish release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v$VERSION" > /dev/null 2>&1; then
+            echo "v$VERSION is already released; bump version in app/pubspec.yaml to release again"
+          else
+            gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "Chatter $VERSION" --generate-notes
+          fi
