@@ -40,6 +40,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> with WidgetsBindingObse
   bool _isTogglingBle = false;
   List<NearbyNode> _nearbyNodes = [];
   StreamSubscription<List<NearbyNode>>? _bleSubscription;
+  final TextEditingController _nearbySearchController = TextEditingController();
 
   @override
   void initState() {
@@ -51,6 +52,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> with WidgetsBindingObse
       torchEnabled: false,
     );
     WidgetsBinding.instance.addObserver(this);
+    _nearbySearchController.addListener(() => setState(() {}));
     _checkCameraPermission();
     _fetchLiveNodeData();
     _initBle();
@@ -121,6 +123,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> with WidgetsBindingObse
     WidgetsBinding.instance.removeObserver(this);
     api.removeOnPeerUpdate(_handlePeerUpdate);
     _bleSubscription?.cancel();
+    _nearbySearchController.dispose();
     _scannerController.dispose();
     super.dispose();
   }
@@ -519,72 +522,138 @@ class _DiscoverScreenState extends State<DiscoverScreen> with WidgetsBindingObse
     );
   }
 
+  /// Whether [node] matches the Nearby search: its advertised name, or the
+  /// peer ID it advertises (or the full ID behind it, once we know it).
+  bool _matchesNearbySearch(NearbyNode node, String query) {
+    if (query.isEmpty) return true;
+    final prefix = node.peerIdPrefix ?? '';
+    final peerId = prefix.isEmpty ? null : api.peerIdForPrefix(prefix);
+    return [node.name, prefix, ?peerId].any((s) => s.toLowerCase().contains(query));
+  }
+
   Widget _buildNearbyBleTab() {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
+    final query = _nearbySearchController.text.trim();
+    final matches = _nearbyNodes.where((n) => _matchesNearbySearch(n, query.toLowerCase())).toList();
 
-    return ListView(
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      children: [
-        SwitchListTile(
-          secondary: Icon(_isBleAdvertising ? Icons.bluetooth : Icons.bluetooth_disabled),
-          title: const Text('Visible to nearby phones'),
-          subtitle: Text(_isBleAdvertising
-              ? 'Phones running Chatter can find you over Bluetooth'
-              : 'Turn on so phones running Chatter can find you'),
-          value: _isBleAdvertising,
-          onChanged: _isTogglingBle ? null : (_) => _toggleBleAdvertising(),
-        ),
-        const Divider(),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 4, 4),
-          child: Row(
-            children: [
-              Expanded(
-                child: Semantics(
-                  header: true,
-                  child: Text('Phones nearby', style: theme.textTheme.titleSmall!.copyWith(color: cs.primary)),
-                ),
-              ),
-              IconButton(
-                icon: const Icon(Icons.refresh),
-                onPressed: () => _bleService.startScan(),
-                tooltip: 'Scan again',
-              ),
-            ],
+    return CustomScrollView(
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+      slivers: [
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: SwitchListTile(
+              secondary: Icon(_isBleAdvertising ? Icons.bluetooth : Icons.bluetooth_disabled),
+              title: const Text('Visible to nearby phones'),
+              subtitle: Text(_isBleAdvertising
+                  ? 'Phones running Chatter can find you over Bluetooth'
+                  : 'Turn on so phones running Chatter can find you'),
+              value: _isBleAdvertising,
+              onChanged: _isTogglingBle ? null : (_) => _toggleBleAdvertising(),
+            ),
           ),
         ),
-
-        if (_nearbyNodes.isEmpty)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Padding(
-                  padding: EdgeInsets.only(top: 2),
-                  child: SizedBox.square(dimension: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+        // Stays in reach while scrolling through a crowded shelter's worth of phones
+        PinnedHeaderSliver(
+          child: ColoredBox(
+            color: theme.scaffoldBackgroundColor,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+              child: TextField(
+                controller: _nearbySearchController,
+                textInputAction: TextInputAction.search,
+                decoration: InputDecoration(
+                  hintText: 'Search nearby phones by name or ID…',
+                  prefixIcon: const Icon(Icons.search),
+                  suffixIcon: query.isEmpty
+                      ? null
+                      : IconButton(
+                          icon: const Icon(Icons.close),
+                          tooltip: 'Clear search',
+                          onPressed: _nearbySearchController.clear,
+                        ),
                 ),
-                const SizedBox(width: 16),
+              ),
+            ),
+          ),
+        ),
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 4, 4),
+            child: Row(
+              children: [
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('Looking for phones running Chatter', style: theme.textTheme.bodyLarge),
-                      const SizedBox(height: 4),
-                      Text(
-                        'They show up here when Chatter is open on them and they\'re visible to nearby phones.',
-                        style: theme.textTheme.bodyMedium!.copyWith(color: cs.onSurfaceVariant),
-                      ),
-                    ],
+                  child: Semantics(
+                    header: true,
+                    child: Text(
+                      query.isNotEmpty && _nearbyNodes.isNotEmpty
+                          ? '${matches.length} of ${_nearbyNodes.length} phones nearby'
+                          : 'Phones nearby',
+                      style: theme.textTheme.titleSmall!.copyWith(color: cs.primary),
+                    ),
                   ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.refresh),
+                  onPressed: () => _bleService.startScan(),
+                  tooltip: 'Scan again',
                 ),
               ],
             ),
+          ),
+        ),
+        if (_nearbyNodes.isEmpty)
+          SliverToBoxAdapter(child: _buildNearbySearching())
+        else if (matches.isEmpty)
+          SliverToBoxAdapter(
+            child: StateMessage(
+              fill: false,
+              icon: Icons.search_off,
+              title: 'No nearby phones match \'$query\'',
+              body: 'Try a handle, or the first few characters of a peer ID.',
+              action: OutlinedButton.icon(
+                icon: const Icon(Icons.close, size: 20),
+                label: const Text('Clear search'),
+                onPressed: _nearbySearchController.clear,
+              ),
+            ),
           )
         else
-          ..._nearbyNodes.map((node) => _buildLiveNodeTile(node)),
+          SliverList.list(children: [for (final node in matches) _buildLiveNodeTile(node)]),
+        const SliverPadding(padding: EdgeInsets.only(bottom: 8)),
       ],
+    );
+  }
+
+  Widget _buildNearbySearching() {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 2),
+            child: SizedBox.square(dimension: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+          ),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Looking for phones running Chatter', style: theme.textTheme.bodyLarge),
+                const SizedBox(height: 4),
+                Text(
+                  'They show up here when Chatter is open on them and they\'re visible to nearby phones.',
+                  style: theme.textTheme.bodyMedium!.copyWith(color: cs.onSurfaceVariant),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 

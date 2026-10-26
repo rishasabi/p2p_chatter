@@ -12,6 +12,7 @@ import 'package:app/screens/initialization_screen.dart';
 import 'package:app/screens/mesh_screen.dart';
 import 'package:app/screens/node_settings_screen.dart';
 import 'package:app/services/api_service.dart';
+import 'package:app/services/ble_service.dart';
 import 'package:app/services/embedded_node_service.dart';
 import 'package:app/services/local_store.dart';
 import 'package:app/theme/app_theme.dart';
@@ -264,6 +265,57 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
       expect(find.text('Visible to nearby phones'), findsOneWidget);
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('Nearby search filters phones by name, advertised ID or full peer ID', (tester) async {
+      await setScreen(tester, const Size(390, 800));
+      final api = ApplicationAPI()..stopPolling();
+      // Known from an earlier message, so its full ID is behind the advertised prefix
+      api.receiveFromNode(incoming('12D3KooWUiNearbyKnownXyz', 'n-1', 'hi', DateTime.now(), handle: 'bob_k'));
+
+      await tester.pumpWidget(host(const DiscoverScreen(myBootstrapData: '')));
+      await tester.pump(const Duration(seconds: 1));
+      await tester.tap(find.text('Nearby'));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+
+      NearbyNode node(String name, String prefix) =>
+          NearbyNode(id: prefix, name: name, rssi: -60, isChatterPeer: true, psm: 129, peerIdPrefix: prefix);
+      BleService().emitNearbyForTest([
+        node('Medic_Anna', '12D3KooWUiMedAnna'),
+        node('ravi', '12D3KooWUiRavi0001'),
+        node('bob_k', '12D3KooWUiNearbyKn'),
+      ]);
+      await tester.pump();
+      expect(find.text('ravi'), findsOneWidget);
+
+      Future<void> search(String text) async {
+        await tester.enterText(find.byType(TextField), text);
+        await tester.pump();
+      }
+
+      await search('medic');
+      expect(find.text('Medic_Anna'), findsOneWidget);
+      expect(find.text('ravi'), findsNothing);
+      expect(find.text('1 of 3 phones nearby'), findsOneWidget);
+
+      await search('Ravi0001'); // the advertised ID prefix
+      expect(find.text('ravi'), findsOneWidget);
+      expect(find.text('Medic_Anna'), findsNothing);
+
+      await search('KnownXyz'); // only in the full peer ID
+      expect(find.text('bob_k'), findsOneWidget);
+      expect(find.text('ravi'), findsNothing);
+
+      await search('nobody');
+      expect(find.text('No nearby phones match \'nobody\''), findsOneWidget);
+      await tester.tap(find.text('Clear search'));
+      await tester.pump();
+      expect(find.text('Medic_Anna'), findsOneWidget);
+      expect(find.text('ravi'), findsOneWidget);
+      expect(find.text('bob_k'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(seconds: 1)); // contact save timer
     });
   });
 

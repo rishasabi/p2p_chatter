@@ -69,6 +69,10 @@ class BleService {
   Function(Map<String, dynamic>)? onBluetoothPeerDisconnected;
 
   Stream<List<NearbyNode>> get nearbyNodes => _nearbyNodesController.stream;
+
+  @visibleForTesting
+  void emitNearbyForTest(List<NearbyNode> nodes) => _nearbyNodesController.add(nodes);
+
   bool get isAdvertising => _isAdvertising;
   bool get isScanning => _isScanning;
 
