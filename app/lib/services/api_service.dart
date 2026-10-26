@@ -71,6 +71,21 @@ class ChatterApiService {
         .toList();
   }
 
+  /// Peers our neighbours told the node about (peer exchange): their ID, the
+  /// addresses they can be dialled on, and the neighbour that passed them on.
+  Future<List<({String id, List<String> addrs, String via})>> getDiscoveredPeers() async {
+    final body = await _get('/peers/discovered');
+    final list = body['peers'] as List? ?? [];
+    return [
+      for (final p in list.cast<Map<String, dynamic>>())
+        (
+          id: p['id'] as String? ?? '',
+          addrs: (p['addrs'] as List?)?.whereType<String>().toList() ?? const <String>[],
+          via: p['via'] as String? ?? '',
+        ),
+    ];
+  }
+
   /// Dials a remote peer by its full multiaddr string.
   ///
   /// Example: `/ip4/192.168.1.5/tcp/4001/p2p/12D3KooW...`

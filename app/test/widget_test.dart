@@ -150,6 +150,32 @@ void main() {
       svc.dispose();
     });
 
+    test('getDiscoveredPeers reads peers learned from neighbours', () async {
+      final client = MockClient((request) async {
+        expect(request.url.path, '/peers/discovered');
+        return http.Response(
+          jsonEncode({
+            'peers': [
+              {
+                'id': '12D3KooWHeardOf',
+                'addrs': ['/ip4/192.168.43.7/tcp/4001/p2p/12D3KooWHeardOf'],
+                'via': '12D3KooWNeighbour',
+                'seen': '2026-10-26T10:00:00Z',
+              }
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      });
+      final svc = ChatterApiService(client: client);
+      final peers = await svc.getDiscoveredPeers();
+      expect(peers.single.id, '12D3KooWHeardOf');
+      expect(peers.single.addrs, ['/ip4/192.168.43.7/tcp/4001/p2p/12D3KooWHeardOf']);
+      expect(peers.single.via, '12D3KooWNeighbour');
+      svc.dispose();
+    });
+
     test('sendMessage posts correct JSON body', () async {
       String? capturedBody;
       final client = MockClient((request) async {
@@ -285,6 +311,22 @@ void main() {
       api.setVerified(fake, false);
       expect(api.hasHandleConflict(fake), isTrue);
       expect(api.hasHandleConflict(medic), isFalse);
+    });
+
+    test('peers heard of from a neighbour are remembered, but listed only once they speak', () {
+      final api = ApplicationAPI()..stopPolling();
+      const heard = '12D3KooWPexHeardOfPeer';
+      api.receiveDiscoveredFromNode([
+        (id: heard, addrs: ['/ip4/192.168.43.7/tcp/4001/p2p/$heard'], via: '12D3KooWPexNeighbour'),
+      ]);
+      // Known (so Wi-Fi reconnects and relays can reach it), but no bare ID in the list
+      expect(api.peerIdForPrefix('12D3KooWPexHeard'), heard);
+      expect(api.peers.map((p) => p['id']), isNot(contains(heard)));
+      expect(api.handleOf(heard), isNull, reason: 'a neighbour cannot name someone else');
+
+      api.receiveFromNode(fromNode(heard, 'pex-1', 'hi, I am on the same hotspot', handle: 'dana_pex'));
+      expect(api.peers.map((p) => p['id']), contains(heard));
+      expect(api.displayName(heard), 'dana_pex');
     });
 
     test('a local alias replaces the handle and peers cannot change it', () {

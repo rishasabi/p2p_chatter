@@ -67,6 +67,8 @@ class ApplicationAPI {
   final Set<String> _wifiDialing = {};
   final Map<String, DateTime> _btRetryAt = {};
   final Map<String, DateTime> _wifiRetryAt = {};
+  final Map<String, int> _wifiMisses = {};
+  static const _maxWifiDials = 3;
 
   /// Last status published per peer, so listeners only hear about changes.
   final Map<String, String> _publishedStatus = {};
@@ -283,15 +285,47 @@ class ApplicationAPI {
   int unreadCount(String peerId) =>
       (_history[peerId] ?? const []).where((m) => m['isOutgoing'] != true && m['seen'] != true).length;
 
-  /// Every known peer, reachable ones first.
+  /// Every known peer, reachable ones first. Peers we only heard of from a
+  /// neighbour stay out until they say who they are or there's a chat, so a
+  /// crowded network doesn't fill the list with bare IDs.
   List<Map<String, dynamic>> get peers {
     final ids = {..._contacts.keys, ..._wifiPeers, ..._bluetoothPeers.keys};
-    return ids.map(peerStatus).toList()
+    return ids.map(peerStatus).where((s) => !_isHearsayOnly(s)).toList()
       ..sort((a, b) {
         if (a['online'] != b['online']) return a['online'] == true ? -1 : 1;
         return (a['name'] as String).toLowerCase().compareTo((b['name'] as String).toLowerCase());
       });
   }
+
+  bool _isHearsayOnly(Map<String, dynamic> status) {
+    final id = status['id'] as String;
+    return _contacts[id]?['learnedVia'] != null &&
+        status['online'] != true &&
+        handleOf(id) == null &&
+        aliasOf(id) == null &&
+        (_history[id]?.isEmpty ?? true);
+  }
+
+  /// Takes in the peers our neighbours told the node about: remembered with
+  /// their addresses (so Wi-Fi reconnects reach them, and the mesh can relay
+  /// to them), but never with a name, which only the peer itself can give.
+  Future<void> _ingestDiscoveredPeers() async {
+    try {
+      _ingestDiscovered(await _service.getDiscoveredPeers());
+    } catch (_) {
+      // Node unreachable, or an older one without peer exchange
+    }
+  }
+
+  void _ingestDiscovered(List<({String id, List<String> addrs, String via})> peers) {
+    for (final p in peers) {
+      _rememberContact(p.id, addrs: p.addrs, learnedVia: p.via);
+    }
+  }
+
+  @visibleForTesting
+  void receiveDiscoveredFromNode(List<({String id, List<String> addrs, String via})> peers) =>
+      _ingestDiscovered(peers);
 
   /// Refreshes Wi-Fi peers from the node and returns every known peer.
   Future<List<Map<String, dynamic>>> getPeers() async {
@@ -299,10 +333,11 @@ class ApplicationAPI {
     return peers;
   }
 
-  void _rememberContact(String peerId, {String? handle, List<String>? addrs}) {
+  void _rememberContact(String peerId, {String? handle, List<String>? addrs, String? learnedVia}) {
     if (peerId.isEmpty || peerId == _myPeerId) return;
     var changed = !_contacts.containsKey(peerId);
     final contact = _contactFor(peerId);
+    if (changed && learnedVia != null) contact['learnedVia'] = learnedVia;
     if (handle != null && handle.isNotEmpty && contact['handle'] != handle) {
       contact['handle'] = handle;
       _handleOwners.putIfAbsent(_handleKey(handle), () => peerId);
@@ -629,6 +664,9 @@ class ApplicationAPI {
     // Our Wi-Fi address can change (new network, DHCP); keep handshakes current
     if (_maintenanceTicks % 10 == 0) unawaited(_refreshOwnAddrs());
 
+    // Who our neighbours are connected to
+    if (_maintenanceTicks % 2 == 0) unawaited(_ingestDiscoveredPeers());
+
     // Read receipts that couldn't be delivered when the chat was viewed
     if (_maintenanceTicks % 10 == 5) {
       for (final peerId in _history.keys.toList()) {
@@ -644,19 +682,27 @@ class ApplicationAPI {
 
   /// Moves known peers back onto Wi-Fi when it's available, using the
   /// addresses learned from their QR code or Bluetooth handshake.
+  /// Peers learned from neighbours can be many, and on networks we aren't on,
+  /// so a few dials at a time, each peer backing off from 30 s to 8 min.
   void _reconnectWifi() {
     final now = DateTime.now();
     for (final entry in _contacts.entries) {
+      if (_wifiDialing.length >= _maxWifiDials) break;
       final id = entry.key;
       final addrs = (entry.value['addrs'] as List?)?.whereType<String>().toList() ?? const <String>[];
+      if (_wifiPeers.contains(id)) _wifiMisses.remove(id);
       if (addrs.isEmpty || _wifiPeers.contains(id) || _wifiDialing.contains(id)) continue;
       if (now.isBefore(_wifiRetryAt[id] ?? now)) continue;
-      _wifiRetryAt[id] = now.add(const Duration(seconds: 30));
+      final misses = _wifiMisses[id] ?? 0;
+      _wifiRetryAt[id] = now.add(Duration(seconds: 30 << misses.clamp(0, 4)));
       _wifiDialing.add(id);
       _service
           .connectPeer(jsonEncode({'id': id, 'addrs': addrs}))
-          .then((_) => _refreshWifiPeers())
-          .catchError((Object _) {}) // still unreachable; retry later
+          .then((_) {
+            _wifiMisses.remove(id);
+            return _refreshWifiPeers();
+          })
+          .catchError((Object _) => _wifiMisses[id] = misses + 1) // still unreachable; retry later
           .whenComplete(() => _wifiDialing.remove(id));
     }
   }
