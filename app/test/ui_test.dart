@@ -1189,6 +1189,20 @@ void main() {
       messenger.setMockStreamHandler(cameraEvents, null);
     });
 
+    for (final (size, scale) in [(const Size(320, 568), 1.0), (const Size(360, 640), 2.0), (const Size(412, 915), 1.3)]) {
+      testWidgets('scanning is in view without scrolling on a ${size.width.round()}x${size.height.round()} phone at ${scale}x text',
+          (tester) async {
+        await setScreen(tester, size);
+        await tester.pumpWidget(host(const WifiQrScreen(initialCode: '{"id":"12D3KooWUiQrFold","addrs":[]}'), textScale: scale));
+        await tester.pump(const Duration(seconds: 1));
+        final button = tester.getRect(find.widgetWithText(FilledButton, 'Scan a peer\'s QR code'));
+        expect(button.top, greaterThanOrEqualTo(0));
+        expect(button.bottom, lessThanOrEqualTo(size.height));
+        expect(find.textContaining('Point your camera at their code to connect without typing IP addresses.'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      });
+    }
+
     testWidgets('explains a missing code and missing camera access instead of failing silently', (tester) async {
       await setScreen(tester, const Size(360, 720));
       await tester.pumpWidget(host(const WifiQrScreen(), textScale: 1.5));
@@ -1198,8 +1212,8 @@ void main() {
       expect(find.text('Your code isn\'t ready'), findsOneWidget);
       expect(find.text('Try again'), findsOneWidget);
 
-      await tester.ensureVisible(find.text('Scan a QR code'));
-      await tester.tap(find.text('Scan a QR code'));
+      await tester.ensureVisible(find.text('Scan a peer\'s QR code'));
+      await tester.tap(find.text('Scan a peer\'s QR code'));
       await tester.pumpAndSettle();
       expect(find.text('Allow camera access to scan'), findsOneWidget);
       expect(find.byType(MobileScanner), findsNothing);
@@ -1235,7 +1249,7 @@ void main() {
       expect(find.text('My Wi-Fi code'), findsOneWidget);
       expect(cameraCalls, isEmpty);
 
-      await tester.tap(find.text('Scan a QR code'));
+      await tester.tap(find.text('Scan a peer\'s QR code'));
       await tester.pumpAndSettle();
       expect(find.byType(MobileScanner), findsOneWidget);
       expect(cameraCalls, contains('start'));
@@ -1267,7 +1281,7 @@ void main() {
       // A code read by the scanner closes it (camera off) and is dialled
       await tester.tap(find.byTooltip('Wi-Fi QR connection'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Scan a QR code'));
+      await tester.tap(find.text('Scan a peer\'s QR code'));
       await tester.pumpAndSettle();
       cameraCalls.clear();
       frames!.success({

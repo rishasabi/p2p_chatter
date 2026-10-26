@@ -6,6 +6,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 import '../application_api.dart';
 import '../models/node_info.dart';
 import '../services/ble_service.dart';
+import '../theme/app_theme.dart';
 import '../widgets/feedback.dart';
 import '../widgets/peer_identity.dart';
 import 'chat_screen.dart';
@@ -131,6 +132,8 @@ class _WifiQrScreenState extends State<WifiQrScreen> {
     final theme = Theme.of(context);
     return Scaffold(
       appBar: AppBar(title: const Text('Wi-Fi QR')),
+      // Scanning stays in view on every screen size, never below the fold
+      bottomNavigationBar: _buildScanBar(theme),
       body: Stack(
         children: [
           LayoutBuilder(
@@ -142,13 +145,26 @@ class _WifiQrScreenState extends State<WifiQrScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
+                      // First thing on screen, at any text size: the bar holding
+                      // the scan button has to stay small enough not to crowd it
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(Icons.qr_code_scanner, color: theme.colorScheme.onSurface),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              'Point your camera at their code to connect without typing IP addresses. '
+                              'The scan button stays at the bottom.',
+                              style: theme.textTheme.bodyMedium!.copyWith(color: theme.colorScheme.onSurface),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 20),
                       _SectionHeading('My Wi-Fi code'),
                       const SizedBox(height: 12),
                       _buildMyCode(math.min(constraints.maxWidth - 96, 260.0).clamp(160.0, 260.0)),
-                      const SizedBox(height: 32),
-                      _SectionHeading('Scan a connection code'),
-                      const SizedBox(height: 12),
-                      _buildScanCallout(theme),
                     ],
                   ),
                 ),
@@ -283,30 +299,41 @@ class _WifiQrScreenState extends State<WifiQrScreen> {
     );
   }
 
-  Widget _buildScanCallout(ThemeData theme) {
+  /// The way to scan someone else's code, pinned under whatever scrolls.
+  Widget _buildScanBar(ThemeData theme) {
     final cs = theme.colorScheme;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: cs.surfaceContainer,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: cs.outlineVariant),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              'On the same Wi-Fi or hotspot as someone? Scan the code on their Wi-Fi QR screen to connect.',
-              style: theme.textTheme.bodyMedium!.copyWith(color: cs.onSurfaceVariant),
+    final chatter = ChatterColors.of(context);
+    return Material(
+      color: cs.surfaceContainer,
+      child: SafeArea(
+        top: false,
+        child: DecoratedBox(
+          decoration: BoxDecoration(border: Border(top: BorderSide(color: cs.outlineVariant))),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
+            child: Center(
+              heightFactor: 1,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 400),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    FilledButton.icon(
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size.fromHeight(56),
+                        backgroundColor: chatter.accent,
+                        foregroundColor: chatter.onAccent,
+                      ),
+                      icon: const Icon(Icons.qr_code_scanner),
+                      label: const Text('Scan a peer\'s QR code'),
+                      onPressed: _isConnecting ? null : _scan,
+                    ),
+                  ],
+                ),
+              ),
             ),
-            const SizedBox(height: 16),
-            FilledButton.icon(
-              icon: const Icon(Icons.qr_code_scanner),
-              label: const Text('Scan a QR code'),
-              onPressed: _isConnecting ? null : _scan,
-            ),
-          ],
+          ),
         ),
       ),
     );
