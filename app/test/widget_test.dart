@@ -336,8 +336,19 @@ void main() {
       expect(ApplicationAPI.validateHandle('alice_01'), isNull);
       expect(ApplicationAPI.validateHandle('  bob.k  '), isNull);
       expect(ApplicationAPI.validateHandle('ab'), isNotNull);
-      expect(ApplicationAPI.validateHandle('a' * 21), isNotNull);
+      expect(ApplicationAPI.validateHandle('a' * 32), isNull); // the node's limit
+      expect(ApplicationAPI.validateHandle('a' * 33), isNotNull);
       expect(ApplicationAPI.validateHandle('has space'), isNotNull);
+    });
+
+    test('a handle another known peer uses, or a lookalike, is found before taking it', () {
+      final api = ApplicationAPI()..stopPolling();
+      const owner = '12D3KooWCollisionOwner';
+      api.receiveFromNode(fromNode(owner, 'col-1', 'hello', handle: 'relief_lead'));
+
+      expect(api.peerUsingHandle('relief_lead'), owner);
+      expect(api.peerUsingHandle(' Re1ief-Lead '), owner); // case, 1/l and separators
+      expect(api.peerUsingHandle('relief_team'), isNull);
     });
 
     test('a later phone claiming a known handle, or a lookalike, is flagged and told apart', () {

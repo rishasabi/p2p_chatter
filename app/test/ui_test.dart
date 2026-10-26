@@ -509,12 +509,27 @@ void main() {
           await tester.pumpWidget(host(const InitializationScreen(), mode: mode, textScale: scale));
           await tester.pump(const Duration(seconds: 3)); // boot steps finish
           await tester.pumpAndSettle();
+          expect(find.text('Choose your handle'), findsOneWidget);
           expect(find.text('Your handle'), findsOneWidget);
           expect(find.text('Join the mesh'), findsOneWidget);
           expect(tester.takeException(), isNull);
         });
       }
     }
+
+    testWidgets('a returning user with a handle goes straight to the app, without the prompt', (tester) async {
+      await setScreen(tester, const Size(390, 800));
+      ApplicationAPI().setMyHandleForTesting('river_k');
+      addTearDown(() => ApplicationAPI().setMyHandleForTesting(null));
+
+      await tester.pumpWidget(host(const InitializationScreen()));
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.pump(const Duration(milliseconds: 500)); // the route transition
+      expect(find.byType(MainNavigationScreen), findsOneWidget);
+      expect(find.text('Choose your handle'), findsNothing);
+      expect(find.text('Join the mesh'), findsNothing);
+      await tester.pump(const Duration(seconds: 1));
+    });
   });
 
   group('Wi-Fi QR', () {
@@ -796,6 +811,58 @@ void main() {
         await scrollTo(link);
       }
       expect(find.byType(MeshLinkSample), findsWidgets);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('the handle can be changed, with a warning when a known peer already uses it', (tester) async {
+      await setScreen(tester, const Size(390, 800));
+      final api = ApplicationAPI()..stopPolling();
+      api.setMyHandleForTesting('river_k');
+      addTearDown(() => api.setMyHandleForTesting(null));
+      api.receiveFromNode(incoming('12D3KooWUiHandleTaken', 'ht-1', 'hi', DateTime.now(), handle: 'medic_lead'));
+
+      await tester.pumpWidget(host(const NodeSettingsScreen()));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.text('@river_k'), findsOneWidget);
+      await tester.tap(find.byTooltip('Change handle'));
+      await tester.pumpAndSettle();
+      expect(find.text('Change your handle'), findsOneWidget);
+      final field = find.descendant(of: find.byType(AlertDialog), matching: find.byType(TextField));
+      FilledButton button(String label) => tester.widget<FilledButton>(find.widgetWithText(FilledButton, label));
+
+      // Unchanged, too short, then a fresh name
+      expect(button('Save').onPressed, isNull);
+      await tester.enterText(field, 'ab');
+      await tester.pump();
+      expect(find.text('Use at least 3 characters'), findsOneWidget);
+      expect(button('Save').onPressed, isNull);
+      await tester.enterText(field, 'fresh_name');
+      await tester.pump();
+      expect(button('Save').onPressed, isNotNull);
+      expect(find.textContaining('Caution', findRichText: true), findsNothing);
+
+      // A lookalike of a known peer's handle needs the confirm button, not Enter
+      await tester.enterText(field, 'Medic-Lead');
+      await tester.pump();
+      expect(find.textContaining('already using the handle @Medic-Lead', findRichText: true), findsOneWidget);
+      expect(find.text('Confirm & Use Handle'), findsOneWidget);
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+      expect(find.text('Change your handle'), findsOneWidget);
+      expect(api.myHandle, 'river_k');
+
+      // No node in tests to bind it to, so saving reports why it couldn't
+      await tester.tap(find.text('Confirm & Use Handle'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Couldn\'t change your handle'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.text('Change your handle'), findsNothing);
+
+      // A new handle shows up at once
+      api.setMyHandleForTesting('dawn_patrol');
+      await tester.pump();
+      expect(find.text('@dawn_patrol'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
 

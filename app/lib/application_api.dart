@@ -40,7 +40,10 @@ class ApplicationAPI {
   final List<void Function(String peerId)> _historyCallbacks = [];
 
   String? _myPeerId;
-  String? _myHandle;
+
+  /// This user's handle; screens that show it listen for renames.
+  final ValueNotifier<String?> _myHandleNotifier = ValueNotifier(null);
+  String? get _myHandle => _myHandleNotifier.value;
   List<String> _sharedAddrs = const [];
 
   /// Everyone we've been connected to, persisted with their handle and last
@@ -101,11 +104,17 @@ class ApplicationAPI {
   /// This user's handle, bound to [myPeerId]; null until one is chosen.
   String? get myHandle => _myHandle;
 
+  /// [myHandle], for widgets that should update when it's chosen or renamed.
+  ValueListenable<String?> get myHandleListenable => _myHandleNotifier;
+
+  /// The node refuses longer handles (service/node: maxHandleLen).
+  static const maxHandleLength = 32;
+
   /// Returns why [handle] can't be used, or null if it's fine.
   static String? validateHandle(String handle) {
     final h = handle.trim();
     if (h.length < 3) return 'Use at least 3 characters';
-    if (h.length > 20) return 'Use at most 20 characters';
+    if (h.length > maxHandleLength) return 'Use at most $maxHandleLength characters';
     if (!_handlePattern.hasMatch(h)) return 'Letters, numbers, dot, dash or underscore only';
     return null;
   }
@@ -146,7 +155,7 @@ class ApplicationAPI {
     // A handle belongs to the identity it was chosen for; a new peer ID
     // (e.g. a reinstall that regenerated the key) means choosing again
     if (profile['peerId'] == info.id && profile['handle'] is String) {
-      _myHandle = profile['handle'] as String;
+      _myHandleNotifier.value = profile['handle'] as String;
       try {
         await _service.setHandle(_myHandle!);
       } catch (e) {
@@ -179,7 +188,7 @@ class ApplicationAPI {
     if (problem != null) throw ArgumentError(problem);
 
     final info = await getNode();
-    _myHandle = h;
+    _myHandleNotifier.value = h;
     await LocalStore.write('profile.json', {'peerId': info.id, 'handle': h});
     try {
       await _service.setHandle(h);
@@ -190,6 +199,28 @@ class ApplicationAPI {
     if (_bleService.isAdvertising) {
       await _bleService.startAdvertising(info.id, name: h);
     }
+    // Our handle outranks anyone else's claim to it, so flags can change
+    _publishPeerChanges();
+  }
+
+  /// The handle saved on this phone, whichever peer ID it was chosen for.
+  /// Lets startup tell a returning user from a new one while the node is
+  /// down and the two can't be matched.
+  Future<String?> savedHandle() async {
+    final handle = (await LocalStore.read('profile.json'))['handle'];
+    return handle is String && validateHandle(handle) == null ? handle : null;
+  }
+
+  /// Another known peer whose handle is [handle] or looks like it (see
+  /// [_handleKey]), so taking it would make the two easy to mix up.
+  String? peerUsingHandle(String handle) {
+    final key = _handleKey(handle.trim());
+    for (final id in _contacts.keys) {
+      if (id == _myPeerId) continue;
+      final theirs = handleOf(id);
+      if (theirs != null && _handleKey(theirs) == key) return id;
+    }
+    return null;
   }
 
   /// Tells the native Bluetooth layer who we are, for handshakes.
@@ -947,6 +978,10 @@ class ApplicationAPI {
 
   @visibleForTesting
   void receiveFromNode(ChatMessage msg) => _dispatchIncoming(msg);
+
+  /// Sets [myHandle] without a node to bind it to or peers to tell.
+  @visibleForTesting
+  void setMyHandleForTesting(String? handle) => _myHandleNotifier.value = handle;
 
   @visibleForTesting
   void receiveReceiptFromNode(Receipt receipt) => _applyReceipt(receipt);

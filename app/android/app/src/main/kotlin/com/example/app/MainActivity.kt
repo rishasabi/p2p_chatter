@@ -418,8 +418,10 @@ class MainActivity : FlutterActivity() {
 
         // Scan response: the user's handle, so nearby phones can show who this is.
         // Anything longer than the 31-byte packet allows fails the whole
-        // advertisement with ADVERTISE_FAILED_DATA_TOO_LARGE, so cap its size.
-        val handleBytes = utf8Prefix(myNodeName, 20)
+        // advertisement with ADVERTISE_FAILED_DATA_TOO_LARGE, so cap its size:
+        // 4 bytes of length, type and 16-bit UUID leave 27 for the handle. Longer
+        // handles (up to 32) arrive whole in the handshake once connected.
+        val handleBytes = utf8Prefix(myNodeName, 27)
         val scanResponse = if (handleBytes.isNotEmpty()) {
             AdvertiseData.Builder()
                 .addServiceData(ParcelUuid(CHATTER_HANDLE_UUID), handleBytes)

@@ -46,18 +46,20 @@ class _InitializationScreenState extends State<InitializationScreen> {
     await api.initialize();
 
     // Fetch persistent node identity
+    NodeInfo? info;
     try {
-      final info = await api.getNode();
-      if (mounted) {
-        setState(() {
-          _liveNodeInfo = info;
-          // Returning user: the handle saved for this peer ID
-          if (_handleController.text.isEmpty) _handleController.text = api.myHandle ?? '';
-        });
-      }
+      info = await api.getNode();
     } catch (_) {}
 
-    // Step through the boot sequence
+    // Returning users go straight in: they have a handle for this peer ID,
+    // or one saved while the node is down and the two can't be matched yet
+    if (api.myHandle != null || (info == null && await api.savedHandle() != null)) {
+      _enterApp();
+      return;
+    }
+    if (mounted) setState(() => _liveNodeInfo = info);
+
+    // First boot: step through the boot sequence, then ask for a handle
     for (int i = 0; i <= _bootSteps.length; i++) {
       await Future.delayed(const Duration(milliseconds: 400));
       if (mounted) {
@@ -78,16 +80,20 @@ class _InitializationScreenState extends State<InitializationScreen> {
 
   bool get _canJoin => _isBootComplete && !_joining && _handleError == null;
 
+  void _enterApp() {
+    if (!mounted) return;
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (context) => const MainNavigationScreen()),
+    );
+  }
+
   Future<void> _joinMesh() async {
     setState(() => _joining = true);
     try {
       // Binds the handle to this node's peer ID and shares it with peers
       await api.setMyHandle(_handleController.text);
-      if (!mounted) return;
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (context) => const MainNavigationScreen()),
-      );
+      _enterApp();
     } catch (e) {
       if (!mounted) return;
       setState(() => _joining = false);
@@ -151,14 +157,18 @@ class _InitializationScreenState extends State<InitializationScreen> {
                         const SizedBox(height: 32),
                         const Spacer(flex: 2),
 
-                        SizedBox(
-                          width: double.infinity,
-                          child: FilledButton(
-                            onPressed: _canJoin ? _joinMesh : null,
-                            style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(56)),
-                            child: Text(_joining ? 'Joining…' : 'Join the mesh'),
-                          ),
-                        ),
+                        // Only asked of new users; returning ones never see it
+                        if (_isBootComplete)
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton(
+                              onPressed: _canJoin ? _joinMesh : null,
+                              style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(56)),
+                              child: Text(_joining ? 'Joining…' : 'Join the mesh'),
+                            ),
+                          )
+                        else
+                          const SizedBox(height: 56),
                       ],
                     ),
                   ),
@@ -234,13 +244,22 @@ class _InitializationScreenState extends State<InitializationScreen> {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
     final peerDisplay = _liveNodeInfo != null
-        ? 'Your peer ID is ${compactPeerId(_liveNodeInfo!.id)}, created on this phone. Your handle is tied to it.'
+        ? 'Your peer ID is ${compactPeerId(_liveNodeInfo!.id)}, a cryptographic key created on this phone. '
+            'It\'s what really identifies you; your handle is tied to it.'
         : 'Your peer ID is unavailable because the local node is not running.';
 
     return Column(
       key: const ValueKey('profile'),
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        Semantics(header: true, child: Text('Choose your handle', style: theme.textTheme.headlineSmall)),
+        const SizedBox(height: 8),
+        Text(
+          'It\'s the name people nearby see: a pseudonym, not your real name unless you want it to be. '
+          'You can change it later in Settings.',
+          style: theme.textTheme.bodyMedium!.copyWith(color: cs.onSurfaceVariant),
+        ),
+        const SizedBox(height: 20),
         TextField(
           controller: _handleController,
           style: theme.textTheme.headlineSmall!.copyWith(fontWeight: FontWeight.w600),
@@ -253,7 +272,7 @@ class _InitializationScreenState extends State<InitializationScreen> {
             prefixText: '@ ',
             prefixStyle: theme.textTheme.headlineSmall!.copyWith(color: cs.onSurfaceVariant),
             floatingLabelBehavior: FloatingLabelBehavior.always,
-            helperText: 'How nearby people see you. 3–20 letters, numbers, dots, dashes or underscores.',
+            helperText: '3–${ApplicationAPI.maxHandleLength} letters, numbers, dots, dashes or underscores.',
             helperMaxLines: 3,
             errorMaxLines: 3,
             // Only complain once the user has started typing

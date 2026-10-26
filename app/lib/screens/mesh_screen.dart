@@ -152,7 +152,12 @@ class _MeshScreenState extends State<MeshScreen> {
           physics: const AlwaysScrollableScrollPhysics(),
           keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
           slivers: [
-            SliverToBoxAdapter(child: MeshMap(peers: peers, myName: api.myHandle ?? '')),
+            SliverToBoxAdapter(
+              child: ValueListenableBuilder(
+                valueListenable: api.myHandleListenable, // renamed in Settings
+                builder: (context, handle, _) => MeshMap(peers: peers, myName: handle ?? ''),
+              ),
+            ),
             SliverToBoxAdapter(
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),

@@ -8,6 +8,7 @@ import '../services/settings_store.dart';
 import '../theme/app_theme.dart';
 import '../widgets/feedback.dart';
 import '../widgets/peer_display.dart';
+import 'edit_handle_dialog.dart';
 import 'help_screen.dart';
 
 class NodeSettingsScreen extends ConsumerStatefulWidget {
@@ -54,12 +55,18 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
     }
   }
 
+  Future<void> _editHandle() async {
+    final handle = await showEditHandleDialog(context);
+    if (handle != null && mounted) {
+      showNotice(context, 'You\'re now @$handle', tone: NoticeTone.success, duration: const Duration(seconds: 2));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
     final themeMode = ref.watch(themeProvider);
-    final handle = api.myHandle;
 
     final peerIdDisplay = _nodeInfo != null
         ? compactPeerId(_nodeInfo!.id)
@@ -99,21 +106,34 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
           ),
 
           const _SectionHeader('Profile'),
-          ListTile(
-            // The handle is bound to this PeerID; peers see it instead of the ID
-            leading: PeerAvatar(peerId: _nodeInfo?.id ?? '', name: handle ?? '?', size: 44),
-            title: Text(handle != null ? '@$handle' : 'This phone', style: theme.textTheme.titleMedium),
-            subtitle: Text(peerIdDisplay),
-            trailing: _nodeInfo != null
-                ? IconButton(
-                    icon: const Icon(Icons.copy),
-                    tooltip: 'Copy full peer ID',
-                    onPressed: () {
-                      Clipboard.setData(ClipboardData(text: _nodeInfo!.id));
-                      showNotice(context, 'Peer ID copied', tone: NoticeTone.success, duration: const Duration(seconds: 2));
-                    },
-                  )
-                : null,
+          ValueListenableBuilder(
+            valueListenable: api.myHandleListenable,
+            builder: (context, handle, _) => ListTile(
+              // The handle is bound to this PeerID; peers see it instead of the ID
+              leading: PeerAvatar(peerId: _nodeInfo?.id ?? '', name: handle ?? '?', size: 44),
+              title: Text(handle != null ? '@$handle' : 'This phone', style: theme.textTheme.titleMedium),
+              subtitle: Text(peerIdDisplay),
+              onTap: _editHandle,
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.edit_outlined),
+                    tooltip: 'Change handle',
+                    onPressed: _editHandle,
+                  ),
+                  if (_nodeInfo != null)
+                    IconButton(
+                      icon: const Icon(Icons.copy),
+                      tooltip: 'Copy full peer ID',
+                      onPressed: () {
+                        Clipboard.setData(ClipboardData(text: _nodeInfo!.id));
+                        showNotice(context, 'Peer ID copied', tone: NoticeTone.success, duration: const Duration(seconds: 2));
+                      },
+                    ),
+                ],
+              ),
+            ),
           ),
 
           const _SectionHeader('Appearance'),
