@@ -17,6 +17,7 @@ import 'package:app/screens/node_settings_screen.dart';
 import 'package:app/screens/wifi_qr_screen.dart';
 import 'package:app/services/api_service.dart';
 import 'package:app/services/ble_service.dart';
+import 'package:app/services/draft_store.dart';
 import 'package:app/services/embedded_node_service.dart';
 import 'package:app/services/local_store.dart';
 import 'package:app/theme/app_theme.dart';
@@ -172,6 +173,40 @@ void main() {
       expect(field().controller!.text, isEmpty);
       expect(tester.testTextInput.isVisible, isTrue);
       await tester.pump(const Duration(seconds: 5)); // let the failure notice time out
+    });
+
+    testWidgets('an unsent draft survives leaving the chat, shows in the list, and goes once sent', (tester) async {
+      await setScreen(tester, const Size(390, 800));
+      final api = ApplicationAPI()..stopPolling();
+      const peer = '12D3KooWUiDraftPeer';
+      api.receiveFromNode(incoming(peer, 'dr-1', 'how many boxes?', DateTime.now(), handle: 'station4'));
+
+      await tester.pumpWidget(host(const ChatScreen(peerName: 'station4', peerId: peer)));
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), 'Need 2 boxes of saline\nat Station 4');
+      await tester.pump();
+
+      // Away to the Chats list: the draft is shown there, ahead of the last message
+      await tester.pumpWidget(host(const MeshScreen()));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.textContaining('Draft: Need 2 boxes of saline at Station 4'), findsOneWidget);
+      expect(find.text('how many boxes?'), findsNothing);
+
+      // Back in the chat, exactly as typed
+      await tester.pumpWidget(host(const ChatScreen(peerName: 'station4', peerId: peer)));
+      await tester.pump();
+      final field = tester.widget<TextField>(find.byType(TextField));
+      expect(field.controller!.text, 'Need 2 boxes of saline\nat Station 4');
+
+      await tester.tap(find.widgetWithIcon(IconButton, Icons.arrow_upward));
+      await tester.pump();
+      expect(DraftStore().hasDraft(peer), isFalse);
+
+      await tester.pumpWidget(host(const MeshScreen()));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.textContaining('Draft:'), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(seconds: 5)); // failure notice, save timers
     });
 
     testWidgets('an impostor is flagged, and the identity sheet copies the ID, verifies and renames', (tester) async {

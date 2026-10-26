@@ -11,6 +11,7 @@ import 'screens/mesh_screen.dart';
 import 'screens/nearby_screen.dart';
 import 'screens/node_settings_screen.dart';
 import 'services/ble_service.dart';
+import 'services/draft_store.dart';
 import 'services/embedded_node_service.dart';
 import 'services/settings_store.dart';
 import 'theme/app_theme.dart';
@@ -25,6 +26,7 @@ void main() async {
   });
   // Saved settings (theme etc.) must be in place before the first frame
   await SettingsStore().load();
+  await DraftStore().load();
   // Ensure the embedded background Go service runs with the app as a single unit
   await EmbeddedNodeService().ensureStarted();
   runApp(const ProviderScope(child: P2PChatApp()));

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../application_api.dart';
 import '../services/api_service.dart';
+import '../services/draft_store.dart';
 import '../theme/app_theme.dart';
 import '../widgets/feedback.dart';
 import '../widgets/peer_display.dart';
@@ -29,6 +30,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final TextEditingController _msgController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final ApplicationAPI api = ApplicationAPI();
+  final DraftStore _drafts = DraftStore();
   // Live status: name (handle) and which transports reach the peer right now
   late Map<String, dynamic> _status;
   // The stored conversation; ApplicationAPI owns it and tells us when it changes
@@ -48,6 +50,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     ChatScreen.visiblePeerId = widget.peerId;
     _status = api.peerStatus(widget.peerId);
     _messages = api.historyFor(widget.peerId);
+    // Whatever was being typed here last time, left or not
+    _msgController.text = _drafts.getDraft(widget.peerId);
+    _hasDraft = _msgController.text.trim().isNotEmpty;
 
     api.onPeerUpdate(_handlePeerUpdate);
     api.onHistoryChanged(_handleHistoryChanged);
@@ -91,8 +96,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
   }
 
-  // Rebuilds the send button when the draft goes between empty and not
+  // Keeps the draft for when the user comes back, and rebuilds the send
+  // button when it goes between empty and not
   void _handleDraftChanged() {
+    _drafts.setDraft(widget.peerId, _msgController.text);
     final hasText = _msgController.text.trim().isNotEmpty;
     if (hasText != _hasDraft) setState(() => _hasDraft = hasText);
   }
@@ -108,6 +115,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) _markRead();
+    // The app may be killed in the background; don't wait for the save timer
+    if (state == AppLifecycleState.paused) _drafts.flush();
   }
 
   bool get _isOnline => _status['online'] == true;
@@ -134,6 +143,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (text.isEmpty || _isSending) return;
 
     _msgController.clear();
+    _drafts.clearDraft(widget.peerId); // it's in the thread now
     setState(() => _isSending = true);
 
     try {

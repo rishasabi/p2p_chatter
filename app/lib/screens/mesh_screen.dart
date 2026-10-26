@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../application_api.dart';
+import '../services/draft_store.dart';
 import '../widgets/brand_mark.dart';
 import '../widgets/feedback.dart';
 import '../widgets/mesh_map.dart';
@@ -18,6 +19,7 @@ class MeshScreen extends StatefulWidget {
 
 class _MeshScreenState extends State<MeshScreen> {
   final ApplicationAPI api = ApplicationAPI();
+  final DraftStore _drafts = DraftStore();
   List<Map<String, dynamic>> peers = [];
   List<Map<String, dynamic>> filteredPeers = [];
   final TextEditingController _searchController = TextEditingController();
@@ -33,6 +35,12 @@ class _MeshScreenState extends State<MeshScreen> {
     _searchController.addListener(_filterPeers);
     api.onPeerUpdate(_handlePeerUpdate);
     api.onHistoryChanged(_handleHistoryChanged);
+    _drafts.addListener(_handleDraftsChanged);
+  }
+
+  // "Draft:" appears and goes as text is typed or sent
+  void _handleDraftsChanged() {
+    if (mounted) setState(() {});
   }
 
   // Status changes are pushed as they happen (Wi-Fi or Bluetooth link up/down)
@@ -98,6 +106,7 @@ class _MeshScreenState extends State<MeshScreen> {
   void dispose() {
     api.removeOnPeerUpdate(_handlePeerUpdate);
     api.removeOnHistoryChanged(_handleHistoryChanged);
+    _drafts.removeListener(_handleDraftsChanged);
     _searchController.dispose();
     super.dispose();
   }
@@ -239,6 +248,7 @@ class _MeshScreenState extends State<MeshScreen> {
             key: ValueKey(peer['id']),
             peer: peer,
             lastMessage: history.isEmpty ? null : history.last,
+            draft: _drafts.getDraft(peer['id'] as String),
             onTap: () => _openChat(peer),
             onLongPress: () => showPeerIdentitySheet(context, peer['id'] as String),
           );
@@ -253,6 +263,7 @@ class _MeshScreenState extends State<MeshScreen> {
 class _PeerRow extends StatelessWidget {
   final Map<String, dynamic> peer;
   final Map<String, dynamic>? lastMessage;
+  final String draft;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
 
@@ -260,6 +271,7 @@ class _PeerRow extends StatelessWidget {
     super.key,
     required this.peer,
     required this.lastMessage,
+    required this.draft,
     required this.onTap,
     required this.onLongPress,
   });
@@ -297,7 +309,8 @@ class _PeerRow extends StatelessWidget {
       if (conflict) 'impersonation warning: this handle is also claimed by another device',
       reachSentence(peer),
       if (unread > 0) '$unread unread',
-      if (last != null) 'last message $time: $preview',
+      if (draft.isNotEmpty) 'draft: ${draft.replaceAll('\n', ' ')}'
+      else if (last != null) 'last message $time: $preview',
     ].join(', ');
 
     return Semantics(
@@ -357,17 +370,7 @@ class _PeerRow extends StatelessWidget {
                     const SizedBox(height: 2),
                     Row(
                       children: [
-                        Expanded(
-                          child: Text(
-                            preview,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: theme.textTheme.bodyMedium!.copyWith(
-                              color: unread > 0 ? cs.onSurface : cs.onSurfaceVariant,
-                              fontWeight: unread > 0 ? FontWeight.w600 : null,
-                            ),
-                          ),
-                        ),
+                        Expanded(child: _PreviewLine(text: preview, draft: draft, emphasised: unread > 0)),
                         if (unread > 0) ...[
                           const SizedBox(width: 8),
                           Badge(
@@ -386,6 +389,38 @@ class _PeerRow extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// The second line of a conversation row: the latest message, or, while
+/// something is typed and not sent, the draft, which takes precedence.
+class _PreviewLine extends StatelessWidget {
+  final String text;
+  final String draft;
+  final bool emphasised;
+
+  const _PreviewLine({required this.text, required this.draft, required this.emphasised});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final style = theme.textTheme.bodyMedium!.copyWith(
+      color: emphasised ? cs.onSurface : cs.onSurfaceVariant,
+      fontWeight: emphasised ? FontWeight.w600 : null,
+    );
+    if (draft.isEmpty) {
+      return Text(text, maxLines: 1, overflow: TextOverflow.ellipsis, style: style);
+    }
+    return Text.rich(
+      TextSpan(children: [
+        TextSpan(text: 'Draft: ', style: TextStyle(color: cs.error, fontWeight: FontWeight.w700)),
+        TextSpan(text: draft.replaceAll('\n', ' ')),
+      ]),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: style,
     );
   }
 }

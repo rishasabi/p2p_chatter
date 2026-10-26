@@ -13,6 +13,7 @@ import 'package:app/models/node_info.dart';
 import 'package:app/models/peer.dart';
 import 'package:app/providers/providers.dart';
 import 'package:app/services/api_service.dart';
+import 'package:app/services/draft_store.dart';
 import 'package:app/services/embedded_node_service.dart';
 import 'package:app/services/local_store.dart';
 
@@ -126,6 +127,30 @@ void main() {
       expect(r.ids, ['a', 'b']);
       expect(r.status, 'read');
       expect(r.isRelayed, isFalse);
+    });
+  });
+
+  group('DraftStore', () {
+    test('keeps one draft per conversation, and blank text is no draft', () async {
+      final drafts = DraftStore();
+      var changes = 0;
+      void listener() => changes++;
+      drafts.addListener(listener);
+
+      drafts.setDraft('12D3KooWDraftA', 'Need saline');
+      drafts.setDraft('room:general', 'Water at the gym');
+      expect(drafts.getDraft('12D3KooWDraftA'), 'Need saline');
+      expect(drafts.getDraft('room:general'), 'Water at the gym');
+      expect(drafts.getDraft('12D3KooWDraftNone'), '');
+
+      drafts.setDraft('12D3KooWDraftA', '   \n ');
+      expect(drafts.hasDraft('12D3KooWDraftA'), isFalse);
+      drafts.clearDraft('room:general');
+      expect(drafts.hasDraft('room:general'), isFalse);
+      expect(changes, 4);
+
+      drafts.removeListener(listener);
+      await drafts.flush();
     });
   });
 
