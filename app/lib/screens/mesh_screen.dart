@@ -9,6 +9,7 @@ import '../widgets/peer_display.dart';
 import '../widgets/peer_identity.dart';
 import '../widgets/time_format.dart';
 import 'chat_screen.dart';
+import 'delete_conversation_dialog.dart';
 import 'join_channel_dialog.dart';
 import 'wifi_qr_screen.dart';
 
@@ -239,6 +240,37 @@ class _MeshScreenState extends State<MeshScreen> {
     );
   }
 
+  /// What a long press on a conversation offers: a peer's identity, and
+  /// deleting the chat (or leaving and deleting the channel).
+  Future<void> _showConversationMenu(String id, {required bool channel}) async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!channel)
+              ListTile(
+                leading: const Icon(Icons.shield_outlined),
+                title: const Text('Peer identity'),
+                onTap: () => Navigator.pop(context, 'identity'),
+              ),
+            ListTile(
+              title: DangerMenuLabel(
+                channel ? Icons.logout : Icons.delete_outline,
+                channel ? 'Leave & delete channel' : 'Delete chat',
+              ),
+              onTap: () => Navigator.pop(context, 'delete'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (choice == 'identity') showPeerIdentitySheet(context, id);
+    if (choice == 'delete') await confirmDeleteConversation(context, id);
+  }
+
   List<Widget> _buildChannels() {
     final query = _searchController.text.toLowerCase().trim().replaceFirst(RegExp(r'^#'), '');
     final shown = api.channels.where((c) => (c['name'] as String).contains(query)).toList();
@@ -279,6 +311,7 @@ class _MeshScreenState extends State<MeshScreen> {
               lastAuthor: author != null ? api.displayName(author) : null,
               draft: _drafts.getDraft(id),
               onTap: () => _openChannel(channel),
+              onLongPress: () => _showConversationMenu(id, channel: true),
             );
           },
         ),
@@ -336,7 +369,7 @@ class _MeshScreenState extends State<MeshScreen> {
             lastMessage: history.isEmpty ? null : history.last,
             draft: _drafts.getDraft(peer['id'] as String),
             onTap: () => _openChat(peer),
-            onLongPress: () => showPeerIdentitySheet(context, peer['id'] as String),
+            onLongPress: () => _showConversationMenu(peer['id'] as String, channel: false),
           );
         },
       ),
@@ -366,6 +399,7 @@ class _ChannelRow extends StatelessWidget {
   final String? lastAuthor;
   final String draft;
   final VoidCallback onTap;
+  final VoidCallback onLongPress;
 
   const _ChannelRow({
     super.key,
@@ -374,6 +408,7 @@ class _ChannelRow extends StatelessWidget {
     required this.lastAuthor,
     required this.draft,
     required this.onTap,
+    required this.onLongPress,
   });
 
   @override
@@ -402,8 +437,11 @@ class _ChannelRow extends StatelessWidget {
       label: label,
       excludeSemantics: true,
       onTap: onTap,
+      onLongPressHint: 'Leave and delete',
+      onLongPress: onLongPress,
       child: InkWell(
         onTap: onTap,
+        onLongPress: onLongPress,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
           child: Row(
@@ -507,7 +545,7 @@ class _PeerRow extends StatelessWidget {
       label: label,
       excludeSemantics: true,
       onTap: onTap,
-      onLongPressHint: 'Show identity',
+      onLongPressHint: 'Identity or delete',
       onLongPress: onLongPress,
       child: InkWell(
         onTap: onTap,

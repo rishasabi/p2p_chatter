@@ -924,9 +924,9 @@ void main() {
       // And can be left again
       await tester.tap(find.byTooltip('Channel options'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Leave channel'));
+      await tester.tap(find.text('Leave & delete channel'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Leave'));
+      await tester.tap(find.widgetWithText(FilledButton, 'Leave & delete'));
       await tester.pumpAndSettle();
       expect(ApplicationAPI().channelStatus(ApplicationAPI.channelConversation('legal-aid')), isNull);
       expect(find.text('#legal-aid'), findsNothing);
@@ -948,6 +948,135 @@ void main() {
         await tester.pump(const Duration(seconds: 1));
       });
     }
+  });
+
+  group('Deleting conversations', () {
+    setUp(() => ApplicationAPI().stopPolling());
+
+    ChatMessage post(String from, String id, String content, String room) =>
+        ChatMessage(id: 0, from: from, content: content, timestamp: DateTime.now(), msgId: id, room: room);
+
+    test('a deleted chat loses its messages and draft, and a carried copy can\'t bring one back', () async {
+      final api = ApplicationAPI()..stopPolling();
+      const peer = '12D3KooWUiDeleteApi';
+      api.receiveFromNode(incoming(peer, 'del-1', 'location of the safe house', DateTime.now(), handle: 'ally'));
+      api.receiveFromNode(incoming(peer, 'del-2', 'bring the radios', DateTime.now(), handle: 'ally'));
+      DraftStore().setDraft(peer, 'half-typed reply');
+      expect(api.historyFor(peer), hasLength(2));
+
+      await api.deleteConversation(peer);
+      expect(api.historyFor(peer), isEmpty);
+      expect(DraftStore().getDraft(peer), '');
+      expect(api.unreadCount(peer), 0);
+
+      // Another phone offers the same message again later: still gone
+      api.receiveFromNode(incoming(peer, 'del-1', 'location of the safe house', DateTime.now(), handle: 'ally'));
+      expect(api.historyFor(peer), isEmpty);
+      // New messages still arrive
+      api.receiveFromNode(incoming(peer, 'del-3', 'are you ok?', DateTime.now(), handle: 'ally'));
+      expect(api.historyFor(peer).single['content'], 'are you ok?');
+    });
+
+    testWidgets('a chat is deleted from its menu, only after confirming', (tester) async {
+      await setScreen(tester, const Size(390, 800));
+      final api = ApplicationAPI()..stopPolling();
+      const peer = '12D3KooWUiDeleteChat';
+      api.receiveFromNode(incoming(peer, 'dc-1', 'incident report: north gate', DateTime.now(), handle: 'scout_7'));
+      await tester.pumpWidget(host(Builder(
+        builder: (context) => Scaffold(
+          body: TextButton(
+            onPressed: () => Navigator.of(context)
+                .push(MaterialPageRoute(builder: (_) => const ChatScreen(peerName: 'scout_7', peerId: peer))),
+            child: const Text('open'),
+          ),
+        ),
+      )));
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+
+      Future<void> askToDelete() async {
+        await tester.tap(find.byTooltip('Chat options'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Delete chat'));
+        await tester.pumpAndSettle();
+      }
+
+      await askToDelete();
+      expect(
+        find.text('Delete conversation with @scout_7? This will permanently remove all messages from your '
+            'device\'s local storage. This action cannot be undone.'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(api.historyFor(peer), hasLength(1));
+      expect(find.byType(ChatScreen), findsOneWidget);
+
+      await askToDelete();
+      await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+      await tester.pumpAndSettle();
+      expect(api.historyFor(peer), isEmpty);
+      expect(find.byType(ChatScreen), findsNothing); // back to where it was opened from
+      expect(find.text('Chat deleted'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(seconds: 3));
+    });
+
+    testWidgets('a channel is left and deleted from the Chats list with a long press', (tester) async {
+      await setScreen(tester, const Size(390, 900));
+      final api = ApplicationAPI()..stopPolling();
+      await api.joinChannel('night-shift');
+      const room = 'room:night-shift';
+      api.receiveFromNode(post('12D3KooWUiDeleteChan', 'dch-1', 'gate code 4471', 'night-shift'));
+      DraftStore().setDraft(room, 'unsent');
+      expect(api.historyFor(room), hasLength(1));
+
+      await tester.pumpWidget(host(const MeshScreen()));
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(find.textContaining('Channels'));
+      await tester.pump();
+      await tester.longPress(find.text('#night-shift'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Leave & delete channel'));
+      await tester.pumpAndSettle();
+      expect(find.text('Leave and delete #night-shift?'), findsOneWidget);
+      await tester.tap(find.widgetWithText(FilledButton, 'Leave & delete'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('#night-shift'), findsNothing);
+      expect(api.channelStatus(room), isNull);
+      expect(api.historyFor(room), isEmpty);
+      expect(DraftStore().getDraft(room), '');
+      // Posts that keep arriving for it aren't shown or kept
+      api.receiveFromNode(post('12D3KooWUiDeleteChan', 'dch-2', 'still here?', 'night-shift'));
+      expect(api.historyFor(room), isEmpty);
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(seconds: 3));
+    });
+
+    testWidgets('a direct chat\'s long press offers its identity or deleting it', (tester) async {
+      await setScreen(tester, const Size(390, 900));
+      final api = ApplicationAPI()..stopPolling();
+      const peer = '12D3KooWUiDeleteRow';
+      api.receiveFromNode(incoming(peer, 'drow-1', 'meet by the fountain', DateTime.now(), handle: 'rowan'));
+      await tester.pumpWidget(host(const MeshScreen()));
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.enterText(find.byType(TextField), 'rowan'); // other tests' contacts are listed too
+      await tester.pump();
+      expect(find.text('meet by the fountain'), findsOneWidget);
+
+      await tester.longPress(find.text('meet by the fountain'));
+      await tester.pumpAndSettle();
+      expect(find.text('Peer identity'), findsOneWidget);
+      await tester.tap(find.text('Delete chat'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, 'Delete'));
+      await tester.pumpAndSettle();
+      expect(find.text('meet by the fountain'), findsNothing);
+      expect(api.historyFor(peer), isEmpty);
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(seconds: 3));
+    });
   });
 
   group('Startup', () {

@@ -8,6 +8,7 @@ import 'models/node_info.dart';
 import 'services/api_service.dart';
 import 'services/ble_service.dart';
 import 'services/chat_store.dart';
+import 'services/draft_store.dart';
 import 'services/local_store.dart';
 import 'services/settings_store.dart';
 
@@ -86,6 +87,11 @@ class ApplicationAPI {
   final Map<String, List<Map<String, dynamic>>> _history = {};
   final Map<String, Map<String, dynamic>> _messageIndex = {};
   final Set<String> _markingRead = {};
+
+  /// IDs of messages deleted on this phone, and when, so a copy another
+  /// phone is still carrying can't bring one back. No content is kept.
+  final Map<String, DateTime> _deleted = {};
+  static const _rememberDeletedFor = Duration(hours: 48);
   final ChatStore _chatStore = ChatStore();
   static const _uuid = Uuid();
 
@@ -148,6 +154,7 @@ class ApplicationAPI {
     });
     if (seeded) _saveContacts();
     await _loadChannels();
+    await _loadDeleted();
     await _loadHistory();
 
     final info = await getNode();
@@ -913,6 +920,39 @@ class ApplicationAPI {
     });
   }
 
+  /// Deletes a conversation from this phone: every message in it (from
+  /// memory and the database), its draft, and for a channel, membership.
+  /// Messages already passed to other phones are theirs; this can't reach
+  /// them.
+  Future<void> deleteConversation(String conversationId) async {
+    if (isChannel(conversationId)) await leaveChannel(conversationId);
+    final now = DateTime.now();
+    for (final m in _history.remove(conversationId) ?? const <Map<String, dynamic>>[]) {
+      final id = m['id'] as String;
+      _messageIndex.remove(id);
+      _deleted[id] = now;
+    }
+    _markingRead.remove(conversationId);
+    final drafts = DraftStore()..clearDraft(conversationId);
+    await Future.wait([drafts.flush(), _chatStore.deleteConversation(conversationId), _saveDeleted()]);
+    _notifyHistory(conversationId);
+  }
+
+  Future<void> _loadDeleted() async {
+    final stored = await LocalStore.read('deleted.json');
+    final cutoff = DateTime.now().subtract(_rememberDeletedFor);
+    stored.forEach((id, at) {
+      final when = at is String ? DateTime.tryParse(at) : null;
+      if (when != null && when.isAfter(cutoff)) _deleted[id] = when;
+    });
+  }
+
+  Future<void> _saveDeleted() {
+    final cutoff = DateTime.now().subtract(_rememberDeletedFor);
+    _deleted.removeWhere((_, at) => at.isBefore(cutoff));
+    return LocalStore.write('deleted.json', {for (final e in _deleted.entries) e.key: e.value.toIso8601String()});
+  }
+
   void _addMessage(Map<String, dynamic> message) {
     final peerId = message['peerId'] as String;
     _messageIndex[message['id'] as String] = message;
@@ -942,7 +982,8 @@ class ApplicationAPI {
   /// A message the node delivered to us: over Wi-Fi, Bluetooth, or relayed.
   void _dispatchIncoming(ChatMessage msg) {
     final id = msg.msgId ?? 'node-${msg.id}-${msg.timestamp.millisecondsSinceEpoch}';
-    if (_messageIndex.containsKey(id)) return; // already have it, e.g. refetched after a restart
+    // Already have it (e.g. refetched after a restart), or it was deleted here
+    if (_messageIndex.containsKey(id) || _deleted.containsKey(id)) return;
     final room = msg.room;
     if (room != null) {
       _receiveChannelPost(id, msg, room);

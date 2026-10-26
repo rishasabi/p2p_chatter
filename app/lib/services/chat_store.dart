@@ -24,6 +24,9 @@ class ChatStore {
     return _db ??= await openDatabase(
       p.join(await getDatabasesPath(), 'chatter.db'),
       version: 2,
+      // Deleted rows are overwritten, not just unlinked, so a deleted chat
+      // can't be read back out of the file
+      onConfigure: (db) => db.rawQuery('PRAGMA secure_delete = ON'),
       onCreate: (db, _) async {
         await db.execute('''
           CREATE TABLE messages(
@@ -73,6 +76,16 @@ class ChatStore {
       await db?.insert('messages', _toRow(message), conflictAlgorithm: ConflictAlgorithm.replace);
     } catch (e) {
       debugPrint('ChatStore: could not save message: $e');
+    }
+  }
+
+  /// Deletes every message in [peerId]'s conversation.
+  Future<void> deleteConversation(String peerId) async {
+    try {
+      final db = await _open();
+      await db?.delete('messages', where: 'peer_id = ?', whereArgs: [peerId]);
+    } catch (e) {
+      debugPrint('ChatStore: could not delete messages: $e');
     }
   }
 

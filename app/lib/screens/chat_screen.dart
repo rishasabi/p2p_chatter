@@ -12,6 +12,7 @@ import '../widgets/message_text.dart';
 import '../widgets/peer_display.dart';
 import '../widgets/peer_identity.dart';
 import '../widgets/time_format.dart';
+import 'delete_conversation_dialog.dart';
 
 /// A conversation: with one peer, or in a channel when [peerId] is a
 /// channel's conversation ID (see [ApplicationAPI.channelConversation]).
@@ -140,24 +141,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   bool get _isPrivateChannel => _channel?['private'] == true;
 
-  Future<void> _leaveChannel() async {
-    final leave = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Leave $_peerName?'),
-        content: Text(_isPrivateChannel
-            ? 'You\'ll stop seeing its posts. To come back, you\'ll need its name and passphrase again.'
-            : 'You\'ll stop seeing its posts. You can join again any time.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Leave')),
-        ],
-      ),
-    );
-    if (leave != true || !mounted) return;
-    await api.leaveChannel(widget.peerId);
-    _drafts.clearDraft(widget.peerId);
-    if (mounted) Navigator.of(context).pop();
+  /// Deletes this chat, or leaves and deletes this channel, once confirmed.
+  Future<void> _deleteConversation() async {
+    FocusScope.of(context).unfocus();
+    if (await confirmDeleteConversation(context, widget.peerId) && mounted) Navigator.of(context).pop();
   }
 
   void _scrollToBottom() {
@@ -298,6 +285,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             tooltip: 'Peer identity',
             onPressed: _showIdentity,
           ),
+          PopupMenuButton<void>(
+            tooltip: 'Chat options',
+            itemBuilder: (_) => [
+              PopupMenuItem(onTap: _deleteConversation, child: const DangerMenuLabel(Icons.delete_outline, 'Delete chat')),
+            ],
+          ),
           const SizedBox(width: 4),
         ],
         bottom: PreferredSize(
@@ -359,7 +352,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         PopupMenuButton<void>(
           tooltip: 'Channel options',
           itemBuilder: (_) => [
-            PopupMenuItem(onTap: _leaveChannel, child: const Text('Leave channel')),
+            PopupMenuItem(
+              onTap: _deleteConversation,
+              child: const DangerMenuLabel(Icons.logout, 'Leave & delete channel'),
+            ),
           ],
         ),
         const SizedBox(width: 4),
