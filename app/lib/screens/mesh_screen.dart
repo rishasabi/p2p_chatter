@@ -7,6 +7,7 @@ import '../widgets/peer_display.dart';
 import '../widgets/peer_identity.dart';
 import '../widgets/time_format.dart';
 import 'chat_screen.dart';
+import 'wifi_qr_screen.dart';
 
 class MeshScreen extends StatefulWidget {
   const MeshScreen({super.key});
@@ -123,6 +124,7 @@ class _MeshScreenState extends State<MeshScreen> {
           ],
         ),
         actions: [
+          const WifiQrButton(),
           IconButton(
             icon: const Icon(Icons.refresh),
             tooltip: 'Refresh peers',
@@ -203,7 +205,8 @@ class _MeshScreenState extends State<MeshScreen> {
           child: StateMessage(
             fill: false,
             title: 'No chats yet',
-            body: 'Open Discover to scan a friend\'s code or find phones running Chatter nearby.',
+            body: 'Find phones running Chatter in the Nearby tab, or scan a friend\'s Wi-Fi code with the QR '
+                'button above.',
             action: OutlinedButton.icon(
               icon: const Icon(Icons.refresh, size: 20),
               label: const Text('Check again'),

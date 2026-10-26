@@ -6,9 +6,9 @@ import 'package:permission_handler/permission_handler.dart';
 import 'application_api.dart';
 import 'providers/theme_provider.dart';
 import 'screens/chat_screen.dart';
-import 'screens/discover_screen.dart';
 import 'screens/initialization_screen.dart';
 import 'screens/mesh_screen.dart';
+import 'screens/nearby_screen.dart';
 import 'screens/node_settings_screen.dart';
 import 'services/ble_service.dart';
 import 'services/embedded_node_service.dart';
@@ -73,7 +73,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
 
   static const _destinations = [
     (icon: Icons.forum_outlined, selected: Icons.forum, label: 'Chats'),
-    (icon: Icons.qr_code_scanner_outlined, selected: Icons.qr_code_scanner, label: 'Discover'),
+    (icon: Icons.bluetooth_searching, selected: Icons.bluetooth_searching, label: 'Nearby'),
     (icon: Icons.settings_outlined, selected: Icons.settings, label: 'Settings'),
   ];
 
@@ -82,7 +82,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     super.initState();
     _screens = [
       const MeshScreen(),
-      const DiscoverScreen(myBootstrapData: ''),
+      const NearbyScreen(),
       const NodeSettingsScreen(),
     ];
     _api.onMessage(_notify);
@@ -121,8 +121,8 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   Widget build(BuildContext context) {
     // Tablets and desktop windows get a side rail instead of a bottom bar
     final wide = MediaQuery.sizeOf(context).width >= 720;
-    // Hidden tabs keep their state but have their animations paused (and
-    // Discover lets go of the camera, see DiscoverScreen._buildScannerTab)
+    // Hidden tabs keep their state but have their animations paused. The
+    // camera never runs in a tab: only the QR scanner route opens it
     final body = IndexedStack(
       index: _currentIndex,
       children: [

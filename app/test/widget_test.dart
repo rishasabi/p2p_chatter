@@ -402,7 +402,7 @@ void main() {
       expect(find.byType(MaterialApp), findsOneWidget);
     });
 
-    testWidgets('MainNavigationScreen displays Chats, Discover, and Settings tabs', (tester) async {
+    testWidgets('MainNavigationScreen displays Chats, Nearby, and Settings tabs', (tester) async {
       final svc = mockApiService();
       await tester.pumpWidget(
         ProviderScope(
@@ -415,7 +415,8 @@ void main() {
       await tester.pump(const Duration(milliseconds: 100));
 
       expect(find.text('Chats'), findsOneWidget);
-      expect(find.text('Discover'), findsOneWidget);
+      expect(find.text('Nearby'), findsOneWidget);
+      expect(find.text('Discover'), findsNothing);
       expect(find.text('Settings'), findsOneWidget);
     });
 

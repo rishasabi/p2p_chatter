@@ -2,15 +2,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 
 import 'package:app/application_api.dart';
+import 'package:app/main.dart';
 import 'package:app/models/chat_message.dart';
 import 'package:app/providers/theme_provider.dart';
 import 'package:app/screens/chat_screen.dart';
-import 'package:app/screens/discover_screen.dart';
 import 'package:app/screens/initialization_screen.dart';
 import 'package:app/screens/mesh_screen.dart';
+import 'package:app/screens/nearby_screen.dart';
 import 'package:app/screens/node_settings_screen.dart';
+import 'package:app/screens/wifi_qr_screen.dart';
 import 'package:app/services/api_service.dart';
 import 'package:app/services/ble_service.dart';
 import 'package:app/services/embedded_node_service.dart';
@@ -309,36 +312,124 @@ void main() {
     }
   });
 
-  group('Discover', () {
+  group('Wi-Fi QR', () {
+    final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    const permissions = MethodChannel('flutter.baseflow.com/permissions/methods');
+    const camera = MethodChannel('dev.steenbakker.mobile_scanner/scanner/method');
+    const cameraEvents = EventChannel('dev.steenbakker.mobile_scanner/scanner/event');
+
+    // Camera permission: 1 = granted, 0 = denied
+    void answerCameraPermission(int status) => messenger.setMockMethodCallHandler(
+          permissions,
+          (call) async => call.method == 'requestPermissions' ? {1: status} : status,
+        );
+
     setUp(() {
       ApplicationAPI().stopPolling();
-      // The camera permission request is answered with "denied"
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(
-        const MethodChannel('flutter.baseflow.com/permissions/methods'),
-        (call) async => call.method == 'requestPermissions' ? {1: 0} : 0,
-      );
+      answerCameraPermission(0);
+    });
+    tearDown(() {
+      messenger.setMockMethodCallHandler(permissions, null);
+      messenger.setMockMethodCallHandler(camera, null);
+      messenger.setMockStreamHandler(cameraEvents, null);
     });
 
     testWidgets('explains a missing code and missing camera access instead of failing silently', (tester) async {
       await setScreen(tester, const Size(360, 720));
-      await tester.pumpWidget(host(const DiscoverScreen(myBootstrapData: ''), textScale: 1.5));
+      await tester.pumpWidget(host(const WifiQrScreen(), textScale: 1.5));
       await tester.pump(const Duration(seconds: 1));
 
       // No node in tests, so there is no code to show
       expect(find.text('Your code isn\'t ready'), findsOneWidget);
       expect(find.text('Try again'), findsOneWidget);
 
-      // The Nearby tab's search spinner never settles, so pump fixed steps
-      await tester.tap(find.text('Scan'));
-      await tester.pump();
-      await tester.pump(const Duration(seconds: 1));
+      await tester.ensureVisible(find.text('Scan a QR code'));
+      await tester.tap(find.text('Scan a QR code'));
+      await tester.pumpAndSettle();
       expect(find.text('Allow camera access to scan'), findsOneWidget);
-
-      await tester.tap(find.text('Nearby'));
-      await tester.pump();
-      await tester.pump(const Duration(seconds: 1));
-      expect(find.text('Visible to nearby phones'), findsOneWidget);
+      expect(find.byType(MobileScanner), findsNothing);
       expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('the camera runs only while the scanner is open, and a scanned code is used', (tester) async {
+      await setScreen(tester, const Size(390, 800));
+      answerCameraPermission(1);
+      final cameraCalls = <String>[];
+      messenger.setMockMethodCallHandler(camera, (call) async {
+        cameraCalls.add(call.method);
+        return switch (call.method) {
+          'state' => 1, // authorised
+          'start' => {'textureId': 7, 'numberOfCameras': 1, 'size': {'width': 640.0, 'height': 480.0}},
+          _ => null,
+        };
+      });
+      MockStreamHandlerEventSink? frames;
+      messenger.setMockStreamHandler(
+        cameraEvents,
+        MockStreamHandler.inline(onListen: (_, sink) {
+          frames = sink;
+        }),
+      );
+
+      await tester.pumpWidget(host(const MainNavigationScreen()));
+      await tester.pump(const Duration(milliseconds: 100));
+
+      // From the Chats top bar: your code first, no camera yet
+      await tester.tap(find.byTooltip('Wi-Fi QR connection'));
+      await tester.pumpAndSettle();
+      expect(find.text('My Wi-Fi code'), findsOneWidget);
+      expect(cameraCalls, isEmpty);
+
+      await tester.tap(find.text('Scan a QR code'));
+      await tester.pumpAndSettle();
+      expect(find.byType(MobileScanner), findsOneWidget);
+      expect(cameraCalls, contains('start'));
+
+      // Leaving the app turns the camera off; coming back turns it on again
+      cameraCalls.clear();
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      await tester.pump();
+      expect(cameraCalls, ['stop']);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+      expect(cameraCalls.last, 'start');
+
+      // Backing out of the scanner releases the camera at once
+      cameraCalls.clear();
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(cameraCalls, contains('stop'));
+      expect(find.byType(MobileScanner), findsNothing);
+
+      // And back home, nothing starts it again
+      cameraCalls.clear();
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(find.text('My Wi-Fi code'), findsNothing);
+      expect(find.byType(MobileScanner), findsNothing);
+      expect(cameraCalls, isEmpty);
+
+      // A code read by the scanner closes it (camera off) and is dialled
+      await tester.tap(find.byTooltip('Wi-Fi QR connection'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Scan a QR code'));
+      await tester.pumpAndSettle();
+      cameraCalls.clear();
+      frames!.success({
+        'name': 'barcode',
+        'data': [
+          {'rawValue': '{"id":"12D3KooWUiScannedPeer","name":"lena","addrs":["/ip4/192.168.43.9/tcp/4001"]}', 'format': 256},
+        ],
+      });
+      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(find.byType(MobileScanner), findsNothing);
+      expect(cameraCalls, contains('stop'));
+      expect(find.text('My Wi-Fi code'), findsOneWidget);
+      // No node in tests, so the dial fails, and says so
+      expect(find.textContaining('Could not connect'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(seconds: 5));
     });
 
     for (final (size, scale) in [(const Size(390, 800), 1.0), (const Size(320, 640), 2.0)]) {
@@ -347,7 +438,7 @@ void main() {
         await setScreen(tester, size);
         // No node in tests: the code handed in stays on show
         await tester.pumpWidget(host(
-          const DiscoverScreen(myBootstrapData: '{"id":"12D3KooWUiQrPeer","addrs":[]}'),
+          const WifiQrScreen(initialCode: '{"id":"12D3KooWUiQrPeer","addrs":[]}'),
           textScale: scale,
         ));
         await tester.pump(const Duration(seconds: 1));
@@ -367,17 +458,45 @@ void main() {
         await tester.pump(const Duration(seconds: 3)); // let the notice time out
       });
     }
+  });
 
-    testWidgets('Nearby search filters phones by name, advertised ID or full peer ID', (tester) async {
+  group('Nearby', () {
+    setUp(() => ApplicationAPI().stopPolling());
+
+    testWidgets('is a tab of its own, with the QR shortcut in its top bar', (tester) async {
+      await setScreen(tester, const Size(390, 800));
+      await tester.pumpWidget(host(const MainNavigationScreen()));
+      await tester.pump(const Duration(milliseconds: 100));
+      // Its search spinner never settles, so pump fixed steps
+      await tester.tap(find.text('Nearby'));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('Visible to nearby phones'), findsOneWidget);
+      expect(find.text('Discover'), findsNothing);
+
+      await tester.tap(find.byTooltip('Wi-Fi QR connection').hitTestable());
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('My Wi-Fi code'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    for (final mode in [ThemeMode.light, ThemeMode.dark]) {
+      testWidgets('lays out at 320px wide with 2x text in ${mode.name} mode', (tester) async {
+        await setScreen(tester, const Size(320, 640));
+        await tester.pumpWidget(host(const NearbyScreen(), mode: mode, textScale: 2));
+        await tester.pump(const Duration(seconds: 1));
+        expect(tester.takeException(), isNull);
+      });
+    }
+
+    testWidgets('search filters phones by name, advertised ID or full peer ID', (tester) async {
       await setScreen(tester, const Size(390, 800));
       final api = ApplicationAPI()..stopPolling();
       // Known from an earlier message, so its full ID is behind the advertised prefix
       api.receiveFromNode(incoming('12D3KooWUiNearbyKnownXyz', 'n-1', 'hi', DateTime.now(), handle: 'bob_k'));
 
-      await tester.pumpWidget(host(const DiscoverScreen(myBootstrapData: '')));
-      await tester.pump(const Duration(seconds: 1));
-      await tester.tap(find.text('Nearby'));
-      await tester.pump();
+      await tester.pumpWidget(host(const NearbyScreen()));
       await tester.pump(const Duration(seconds: 1));
 
       NearbyNode node(String name, String prefix) =>
