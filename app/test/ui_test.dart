@@ -818,6 +818,29 @@ void main() {
   group('Chats list', () {
     setUp(() => ApplicationAPI().stopPolling());
 
+    testWidgets('a conversation with a new message moves to the top', (tester) async {
+      await setScreen(tester, const Size(390, 900));
+      final api = ApplicationAPI()..stopPolling();
+      const quiet = '12D3KooWUiTopQuiet', busy = '12D3KooWUiTopBusy';
+      final now = DateTime.now();
+      api.receiveFromNode(incoming(quiet, 'top-1', 'earlier today', now.subtract(const Duration(hours: 2)), handle: 'top_quiet'));
+      api.receiveFromNode(incoming(busy, 'top-2', 'just now', now.subtract(const Duration(minutes: 1)), handle: 'top_busy'));
+      await api.markRead(quiet);
+      await api.markRead(busy);
+      await tester.pumpWidget(host(const MeshScreen()));
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.enterText(find.byType(TextField), 'top_'); // other tests' contacts are listed too
+      await tester.pump();
+      double rowY(String name) => tester.getTopLeft(find.text(name)).dy;
+      expect(rowY('top_busy'), lessThan(rowY('top_quiet')));
+
+      api.receiveFromNode(incoming(quiet, 'top-3', 'urgent: come now', DateTime.now(), handle: 'top_quiet'));
+      await tester.pump();
+      expect(rowY('top_quiet'), lessThan(rowY('top_busy')));
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(seconds: 1));
+    });
+
     testWidgets('lists conversations with a preview and filters by search', (tester) async {
       await setScreen(tester, const Size(390, 800));
       final api = ApplicationAPI()..stopPolling();

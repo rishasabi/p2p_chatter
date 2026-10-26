@@ -276,6 +276,41 @@ void main() {
           handle: handle,
         );
 
+    test('a reply in the same second as the message it answers sorts after it', () async {
+      final api = ApplicationAPI()..stopPolling();
+      const peer = '12D3KooWOrderSameSecond';
+      final sentAt = DateTime.utc(2026, 10, 26, 12, 0, 0, 800);
+      ChatMessage reply(String id, String ts) => ChatMessage.fromJson(
+          {'id': 0, 'from': peer, 'content': id, 'timestamp': ts, 'msg_id': id, 'via': peer});
+      // The node's timestamps now carry milliseconds
+      expect(reply('x', '2026-10-26T12:00:00.900Z').timestamp.millisecond, 900);
+
+      api.receiveFromNode(reply('before', '2026-10-26T12:00:00.100Z'));
+      api.receiveFromNode(reply('after', '2026-10-26T12:00:00.900Z'));
+      // Our message went out at .800, between the two
+      final mine = {
+        'id': 'mine', 'peerId': peer, 'content': 'mine', 'isOutgoing': true, 'timestamp': sentAt, 'status': 'sent',
+      };
+      api.debugAddMessage(mine);
+      expect(api.historyFor(peer).map((m) => m['id']), ['before', 'mine', 'after']);
+    });
+
+    test('the Chats list puts unread first, then the latest conversation, then names', () async {
+      final api = ApplicationAPI()..stopPolling();
+      final now = DateTime.now();
+      ChatMessage msg(String from, String id, Duration ago) =>
+          ChatMessage(id: 0, from: from, content: id, timestamp: now.subtract(ago), msgId: id, handle: id);
+      api.receiveFromNode(msg('12D3KooWOrderOld', 'zed_old', const Duration(hours: 3)));
+      api.receiveFromNode(msg('12D3KooWOrderNew', 'yan_new', const Duration(minutes: 5)));
+      api.receiveFromNode(msg('12D3KooWOrderUnread', 'xu_unread', const Duration(hours: 9)));
+      await api.markRead('12D3KooWOrderOld');
+      await api.markRead('12D3KooWOrderNew');
+
+      final order = api.peers.map((p) => p['id']).where((id) => (id as String).startsWith('12D3KooWOrder')).toList();
+      expect(order.indexOf('12D3KooWOrderUnread'), lessThan(order.indexOf('12D3KooWOrderNew')));
+      expect(order.indexOf('12D3KooWOrderNew'), lessThan(order.indexOf('12D3KooWOrderOld')));
+    });
+
     test('channel posts caught up from history slot in by when they were written', () async {
       final api = ApplicationAPI()..stopPolling();
       await api.joinChannel('catch-up');

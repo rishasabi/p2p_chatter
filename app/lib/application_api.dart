@@ -326,16 +326,34 @@ class ApplicationAPI {
   int unreadCount(String peerId) =>
       (_history[peerId] ?? const []).where((m) => m['isOutgoing'] != true && m['seen'] != true).length;
 
-  /// Every known peer, reachable ones first. Peers we only heard of from a
-  /// neighbour stay out until they say who they are or there's a chat, so a
-  /// crowded network doesn't fill the list with bare IDs.
+  /// Every known peer, in the order of [compareConversations]. Peers we only
+  /// heard of from a neighbour stay out until they say who they are or
+  /// there's a chat, so a crowded network doesn't fill the list with bare IDs.
   List<Map<String, dynamic>> get peers {
     final ids = {..._contacts.keys, ..._wifiPeers, ..._bluetoothPeers.keys};
-    return ids.map(peerStatus).where((s) => !_isHearsayOnly(s)).toList()
-      ..sort((a, b) {
-        if (a['online'] != b['online']) return a['online'] == true ? -1 : 1;
-        return (a['name'] as String).toLowerCase().compareTo((b['name'] as String).toLowerCase());
-      });
+    return ids.map(peerStatus).where((s) => !_isHearsayOnly(s)).toList()..sort(compareConversations);
+  }
+
+  /// When the newest message in a conversation (a peer ID or a channel's
+  /// conversation ID) was written, sent or received; null if there's none.
+  DateTime? lastActivity(String conversationId) {
+    final history = _history[conversationId];
+    return history == null || history.isEmpty ? null : history.last['timestamp'] as DateTime;
+  }
+
+  /// The Chats list order for [peers] and [channels] statuses: unread first,
+  /// then the most recent conversation, then by name for those with none.
+  int compareConversations(Map<String, dynamic> a, Map<String, dynamic> b) {
+    final unreadA = (a['unread'] as int? ?? 0) > 0, unreadB = (b['unread'] as int? ?? 0) > 0;
+    if (unreadA != unreadB) return unreadA ? -1 : 1;
+    final atA = lastActivity(a['id'] as String), atB = lastActivity(b['id'] as String);
+    if (atA != null || atB != null) {
+      if (atA == null) return 1;
+      if (atB == null) return -1;
+      final byTime = atB.compareTo(atA);
+      if (byTime != 0) return byTime;
+    }
+    return (a['name'] as String).toLowerCase().compareTo((b['name'] as String).toLowerCase());
   }
 
   /// Peers we've only heard of (from a neighbour, with no name yet) or only
@@ -844,9 +862,10 @@ class ApplicationAPI {
     };
   }
 
-  /// Every joined channel, the default one first.
+  /// Every joined channel, in the order of [compareConversations].
   List<Map<String, dynamic>> get channels =>
-      [for (final c in _channels) channelStatus(channelConversation(c['id'] as String))!];
+      [for (final c in _channels) channelStatus(channelConversation(c['id'] as String))!]
+        ..sort(compareConversations);
 
   Future<void> _loadChannels() async {
     final stored = await LocalStore.read('channels.json');
@@ -1067,6 +1086,10 @@ class ApplicationAPI {
 
   @visibleForTesting
   void receiveFromNode(ChatMessage msg) => _dispatchIncoming(msg);
+
+  /// Adds [message] (see [ChatStore] for its shape) as if sent or received.
+  @visibleForTesting
+  void debugAddMessage(Map<String, dynamic> message) => _addMessage(message);
 
   /// Sets [myHandle] without a node to bind it to or peers to tell.
   @visibleForTesting

@@ -88,7 +88,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (!mounted || peerId != widget.peerId) return;
     final next = api.historyFor(peerId);
     final added = next.length - _messages.length;
-    final sentByMe = added > 0 && next.last['isOutgoing'] == true;
+    // Ours wherever it lands, not only when last: a post caught up from
+    // history, or with an author's clock ahead of ours, can sort after it
+    final known = {for (final m in _messages) m['id']};
+    final sentByMe = next.any((m) => m['isOutgoing'] == true && !known.contains(m['id']));
     setState(() {
       _channel = api.channelStatus(widget.peerId);
       _messages = next;

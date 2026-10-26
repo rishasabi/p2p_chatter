@@ -55,9 +55,12 @@ class _MeshScreenState extends State<MeshScreen> {
     _filterPeers();
   }
 
-  // Keeps each row's last-message preview current, including messages we send
+  // Keeps each row's last-message preview current, including messages we
+  // send, and moves the conversation that just changed to the top
   void _handleHistoryChanged(String _) {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    peers = api.peers;
+    _filterPeers();
   }
 
   Future<void> _loadPeers() async {
