@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -16,6 +18,7 @@ import 'services/draft_store.dart';
 import 'services/embedded_node_service.dart';
 import 'services/settings_store.dart';
 import 'theme/app_theme.dart';
+import 'widgets/feedback.dart';
 import 'widgets/message_text.dart';
 
 void main() async {
@@ -71,6 +74,9 @@ class MainNavigationScreen extends StatefulWidget {
 
 class _MainNavigationScreenState extends State<MainNavigationScreen> {
   int _currentIndex = 0;
+  // Back on Chats asks once more before leaving the app
+  bool _exitArmed = false;
+  Timer? _exitTimer;
   final _api = ApplicationAPI();
   // Tabs are built on first visit and then kept, so switching back is instant
   // and doesn't reload anything
@@ -100,8 +106,29 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
   @override
   void dispose() {
     _api.removeOnMessage(_notify);
+    _exitTimer?.cancel();
     super.dispose();
   }
+
+  // Back from Nearby or Settings goes to Chats rather than out of the app;
+  // on Chats, a second press within two seconds leaves
+  Widget _withBackHandling(Widget child) => PopScope(
+        canPop: _currentIndex == 0 && _exitArmed,
+        onPopInvokedWithResult: (didPop, _) {
+          if (didPop) return;
+          if (_currentIndex != 0) {
+            _select(0);
+            return;
+          }
+          setState(() => _exitArmed = true);
+          showNotice(context, 'Press back again to exit', duration: const Duration(seconds: 2));
+          _exitTimer?.cancel();
+          _exitTimer = Timer(const Duration(seconds: 2), () {
+            if (mounted) setState(() => _exitArmed = false);
+          });
+        },
+        child: child,
+      );
 
   // A message notification, unless that conversation is on screen right now
   void _notify(Map<String, dynamic> message) {
@@ -142,7 +169,7 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
     );
 
     if (wide) {
-      return Scaffold(
+      return _withBackHandling(Scaffold(
         body: Row(
           children: [
             NavigationRail(
@@ -162,10 +189,10 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
             Expanded(child: body),
           ],
         ),
-      );
+      ));
     }
 
-    return Scaffold(
+    return _withBackHandling(Scaffold(
       body: body,
       bottomNavigationBar: NavigationBar(
         selectedIndex: _currentIndex,
@@ -179,6 +206,6 @@ class _MainNavigationScreenState extends State<MainNavigationScreen> {
             ),
         ],
       ),
-    );
+    ));
   }
 }

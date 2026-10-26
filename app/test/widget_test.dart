@@ -602,6 +602,51 @@ void main() {
       expect(find.text('Settings'), findsOneWidget);
     });
 
+    testWidgets('back from Nearby or Settings goes to Chats; on Chats it takes a second press to leave',
+        (tester) async {
+      var exits = 0;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'SystemNavigator.pop') exits++;
+        return null;
+      });
+      addTearDown(() => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null));
+      tester.view.physicalSize = const Size(390, 800); // a phone: the bottom bar, not the side rail
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(ProviderScope(
+        overrides: [apiServiceProvider.overrideWithValue(mockApiService())],
+        child: const MaterialApp(home: MainNavigationScreen()),
+      ));
+      await tester.pump(const Duration(milliseconds: 100));
+      NavigationBar bar() => tester.widget<NavigationBar>(find.byType(NavigationBar));
+
+      for (final tab in ['Settings', 'Nearby']) {
+        await tester.tap(find.text(tab).last);
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(bar().selectedIndex, isNot(0));
+        await tester.binding.handlePopRoute();
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(bar().selectedIndex, 0, reason: 'back from $tab');
+        expect(exits, 0);
+      }
+
+      // On Chats: the first press only warns; a second soon after leaves
+      await tester.binding.handlePopRoute();
+      await tester.pump();
+      expect(find.text('Press back again to exit'), findsOneWidget);
+      expect(exits, 0);
+      await tester.binding.handlePopRoute();
+      await tester.pump();
+      expect(exits, 1);
+
+      // Too long after, it warns again
+      await tester.pump(const Duration(seconds: 3));
+      await tester.binding.handlePopRoute();
+      await tester.pump();
+      expect(exits, 1);
+      await tester.pump(const Duration(seconds: 3));
+    });
+
     testWidgets('Tapping Settings tab opens the settings screen', (tester) async {
       final svc = mockApiService();
       await tester.pumpWidget(
