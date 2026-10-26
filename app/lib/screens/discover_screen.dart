@@ -274,7 +274,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> with WidgetsBindingObse
           title: const Text('Discover'),
           bottom: const TabBar(
             tabs: [
-              Tab(icon: Icon(Icons.qr_code), text: 'My code'),
+              Tab(icon: Icon(Icons.qr_code), text: 'Wi-Fi QR'),
               Tab(icon: Icon(Icons.qr_code_scanner), text: 'Scan'),
               Tab(icon: Icon(Icons.bluetooth_searching), text: 'Nearby'),
             ],
@@ -282,7 +282,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> with WidgetsBindingObse
         ),
         body: TabBarView(
           children: [
-            // Tab 1: Show Own QR Code (Always available offline, with Bluetooth identity)
+            // Tab 1: Show own QR code (network addresses, for Wi-Fi or a shared hotspot)
             _buildMyCodeTab(),
 
             // Tab 2: Scan Peer's QR Code
@@ -326,10 +326,35 @@ class _DiscoverScreenState extends State<DiscoverScreen> with WidgetsBindingObse
               constraints: const BoxConstraints(maxWidth: 400),
               child: Column(
                 children: [
+                  // The code carries network addresses, not a Bluetooth pairing;
+                  // say so before anyone tries it with Wi-Fi off
+                  DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: cs.secondaryContainer,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.wifi, size: 18, color: cs.onSecondaryContainer),
+                          const SizedBox(width: 8),
+                          Flexible(
+                            child: Text(
+                              'Wi-Fi / hotspot connection code',
+                              style: theme.textTheme.labelLarge!.copyWith(color: cs.onSecondaryContainer),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
                   // Always dark on white, whatever the theme: scanners need the contrast
                   Semantics(
                     image: true,
-                    label: 'Your connection code',
+                    label: 'Your Wi-Fi connection code',
                     child: Container(
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
@@ -362,7 +387,8 @@ class _DiscoverScreenState extends State<DiscoverScreen> with WidgetsBindingObse
                   ],
                   const SizedBox(height: 16),
                   Text(
-                    'Ask the other person to scan this from their Discover tab. You\'ll connect over Bluetooth or the local network.',
+                    'This QR code shares your local network address for high-speed Wi-Fi or mobile hotspot '
+                    'connection. To connect without Wi-Fi, use the Bluetooth \'Nearby\' tab.',
                     textAlign: TextAlign.center,
                     style: theme.textTheme.bodyMedium!.copyWith(color: cs.onSurfaceVariant),
                   ),
@@ -490,7 +516,7 @@ class _DiscoverScreenState extends State<DiscoverScreen> with WidgetsBindingObse
                     borderRadius: BorderRadius.circular(20),
                   ),
                   child: Text(
-                    'Point at someone\'s Chatter code to connect',
+                    'Point camera at someone\'s Wi-Fi connection code',
                     textAlign: TextAlign.center,
                     style: textTheme.bodyMedium!.copyWith(color: Colors.white),
                   ),

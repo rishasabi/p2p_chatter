@@ -267,6 +267,24 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    for (final (size, scale) in [(const Size(390, 800), 1.0), (const Size(320, 640), 2.0)]) {
+      testWidgets('the QR code says it needs Wi-Fi or a hotspot and points to Nearby (${scale}x text)',
+          (tester) async {
+        await setScreen(tester, size);
+        // No node in tests: the code handed in stays on show
+        await tester.pumpWidget(host(
+          const DiscoverScreen(myBootstrapData: '{"id":"12D3KooWUiQrPeer","addrs":[]}'),
+          textScale: scale,
+        ));
+        await tester.pump(const Duration(seconds: 1));
+
+        expect(find.text('Wi-Fi QR'), findsOneWidget);
+        expect(find.text('Wi-Fi / hotspot connection code'), findsOneWidget);
+        expect(find.textContaining('use the Bluetooth \'Nearby\' tab'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      });
+    }
+
     testWidgets('Nearby search filters phones by name, advertised ID or full peer ID', (tester) async {
       await setScreen(tester, const Size(390, 800));
       final api = ApplicationAPI()..stopPolling();
