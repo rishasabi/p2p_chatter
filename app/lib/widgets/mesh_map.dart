@@ -210,12 +210,11 @@ class MeshLegend extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final style = theme.textTheme.bodySmall!.copyWith(color: theme.colorScheme.onSurfaceVariant);
-    final color = ChatterColors.of(context).link;
 
-    Widget item(String label, double dash, double gap) => Row(
+    Widget item(String label, MeshLink link) => Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            CustomPaint(size: const Size(22, 10), painter: _LegendLine(color, dash, gap)),
+            MeshLinkSample(link),
             const SizedBox(width: 6),
             Text(label, style: style),
           ],
@@ -225,9 +224,35 @@ class MeshLegend extends StatelessWidget {
       child: Wrap(
         spacing: 16,
         runSpacing: 4,
-        children: [item('Wi-Fi', 0, 0), item('Bluetooth', 6, 4), item('Relayed', 0.1, 5)],
+        children: [
+          item('Wi-Fi', MeshLink.wifi),
+          item('Bluetooth', MeshLink.bluetooth),
+          item('Relayed', MeshLink.relayed),
+        ],
       ),
     );
+  }
+}
+
+/// How a peer is linked to you, as the mesh map draws it.
+enum MeshLink { wifi, bluetooth, relayed }
+
+/// One of the mesh map's link lines on its own: solid for Wi-Fi, dashed for
+/// Bluetooth, dotted for relayed.
+class MeshLinkSample extends StatelessWidget {
+  final MeshLink link;
+  final double width;
+
+  const MeshLinkSample(this.link, {super.key, this.width = 22});
+
+  @override
+  Widget build(BuildContext context) {
+    final (dash, gap) = switch (link) {
+      MeshLink.wifi => (0.0, 0.0),
+      MeshLink.bluetooth => (6.0, 4.0),
+      MeshLink.relayed => (0.1, 5.0),
+    };
+    return CustomPaint(size: Size(width, 10), painter: _LegendLine(ChatterColors.of(context).link, dash, gap));
   }
 }
 

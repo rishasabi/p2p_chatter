@@ -9,6 +9,7 @@ import 'package:app/main.dart';
 import 'package:app/models/chat_message.dart';
 import 'package:app/providers/theme_provider.dart';
 import 'package:app/screens/chat_screen.dart';
+import 'package:app/screens/help_screen.dart';
 import 'package:app/screens/initialization_screen.dart';
 import 'package:app/screens/mesh_screen.dart';
 import 'package:app/screens/nearby_screen.dart';
@@ -19,6 +20,7 @@ import 'package:app/services/ble_service.dart';
 import 'package:app/services/embedded_node_service.dart';
 import 'package:app/services/local_store.dart';
 import 'package:app/theme/app_theme.dart';
+import 'package:app/widgets/mesh_map.dart';
 import 'package:app/widgets/time_format.dart';
 
 /// WCAG contrast ratio between two opaque colours.
@@ -540,15 +542,59 @@ void main() {
   });
 
   group('Settings', () {
+    setUp(() => ApplicationAPI().stopPolling());
+
     for (final mode in [ThemeMode.light, ThemeMode.dark]) {
       testWidgets('lays out at 320px wide with 2x text in ${mode.name} mode', (tester) async {
         await setScreen(tester, const Size(320, 640));
         await tester.pumpWidget(host(const NodeSettingsScreen(), mode: mode, textScale: 2));
         await tester.pump(const Duration(milliseconds: 100));
-        await tester.scrollUntilVisible(find.text('Not delivered'), 200);
+        await tester.scrollUntilVisible(find.text('Help & guides'), 200);
+        expect(tester.takeException(), isNull);
+      });
+
+      testWidgets('Help & guides lays out at 320px wide with 2x text in ${mode.name} mode', (tester) async {
+        await setScreen(tester, const Size(320, 640));
+        await tester.pumpWidget(host(const HelpScreen(), mode: mode, textScale: 2));
+        await tester.pump();
+        await tester.scrollUntilVisible(find.text('Impersonation warning'), 300);
         expect(tester.takeException(), isNull);
       });
     }
+
+    testWidgets('the icon legend lives on its own Help page, not in the settings list', (tester) async {
+      await setScreen(tester, const Size(390, 800));
+      await tester.pumpWidget(host(const NodeSettingsScreen()));
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.scrollUntilVisible(find.text('Help & guides'), 200);
+      expect(find.text('Not delivered'), findsNothing);
+      expect(find.text('Understand delivery icons, mesh hops, and receipts'), findsOneWidget);
+
+      await tester.ensureVisible(find.text('Help & guides'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Help & guides'));
+      await tester.pumpAndSettle();
+      expect(find.byType(HelpScreen), findsOneWidget);
+      final help = find.descendant(of: find.byType(HelpScreen), matching: find.byType(Scrollable)).first;
+      Future<void> scrollTo(String text) => tester.scrollUntilVisible(find.text(text), 200, scrollable: help);
+      // Every delivery state the chat can show, with the icon it shows
+      for (final (icon, word) in [
+        (Icons.schedule, 'Sending'),
+        (Icons.hourglass_empty, 'Waiting'),
+        (Icons.check, 'Sent'),
+        (Icons.done_all, 'Delivered'),
+        (Icons.visibility_outlined, 'Read'),
+        (Icons.error_outline, 'Not delivered'),
+      ]) {
+        await scrollTo(word);
+        expect(find.byIcon(icon), findsOneWidget, reason: word);
+      }
+      for (final link in ['Wi-Fi', 'Bluetooth', 'Via mesh relay']) {
+        await scrollTo(link);
+      }
+      expect(find.byType(MeshLinkSample), findsWidgets);
+      expect(tester.takeException(), isNull);
+    });
 
     testWidgets('theme choice switches the whole app', (tester) async {
       await setScreen(tester, const Size(390, 800));

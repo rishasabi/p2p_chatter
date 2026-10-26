@@ -8,6 +8,7 @@ import '../services/settings_store.dart';
 import '../theme/app_theme.dart';
 import '../widgets/feedback.dart';
 import '../widgets/peer_display.dart';
+import 'help_screen.dart';
 
 class NodeSettingsScreen extends ConsumerStatefulWidget {
   const NodeSettingsScreen({super.key});
@@ -169,24 +170,16 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
             },
           ),
 
-          const _SectionHeader('What the message icons mean'),
-          _buildLegendItem(Icons.schedule, 'Sending', 'Leaving this phone'),
-          _buildLegendItem(Icons.hourglass_empty, 'Waiting', 'No one in range yet. It goes out when someone is, and other phones pass it on'),
-          _buildLegendItem(Icons.check, 'Sent', 'Handed to the mesh, directly or through other phones'),
-          _buildLegendItem(Icons.done_all, 'Delivered', 'Their phone confirmed it arrived'),
-          _buildLegendItem(Icons.visibility_outlined, 'Read', 'They opened the chat'),
-          _buildLegendItem(Icons.error_outline, 'Not delivered', 'There was no Wi-Fi, Bluetooth or relay path at the time',
-              color: cs.error),
+          const _SectionHeader('Help'),
+          ListTile(
+            leading: const Icon(Icons.help_outline),
+            title: const Text('Help & guides'),
+            subtitle: const Text('Understand delivery icons, mesh hops, and receipts'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const HelpScreen())),
+          ),
         ],
       ),
-    );
-  }
-
-  Widget _buildLegendItem(IconData icon, String title, String subtitle, {Color? color}) {
-    return ListTile(
-      leading: Icon(icon, color: color, size: 22),
-      title: Text(title),
-      subtitle: Text(subtitle),
     );
   }
 }
