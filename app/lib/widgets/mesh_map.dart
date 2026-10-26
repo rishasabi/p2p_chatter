@@ -158,9 +158,9 @@ class _MeshPainter extends CustomPainter {
       }
     }
 
-    // You: an ember node with a soft halo
-    canvas.drawCircle(c, 31, Paint()..color = AppTheme.ember.withValues(alpha: 0.16));
-    canvas.drawCircle(c, 23, Paint()..color = AppTheme.ember);
+    // You: an ember (accent) node with a soft halo
+    canvas.drawCircle(c, 31, Paint()..color = colors.accent.withValues(alpha: 0.16));
+    canvas.drawCircle(c, 23, Paint()..color = colors.accent);
     final trimmed = myName.trim();
     final me = TextPainter(
       text: TextSpan(
@@ -169,7 +169,7 @@ class _MeshPainter extends CustomPainter {
           fontFamily: AppTheme.displayFont,
           fontSize: trimmed.isEmpty ? 11 : 19,
           fontWeight: FontWeight.w700,
-          color: AppTheme.onEmber,
+          color: colors.onAccent,
           height: 1,
         ),
       ),

@@ -10,6 +10,7 @@ import '../widgets/feedback.dart';
 import '../widgets/peer_display.dart';
 import 'edit_handle_dialog.dart';
 import 'help_screen.dart';
+import 'theme_editor_screen.dart';
 
 class NodeSettingsScreen extends ConsumerStatefulWidget {
   const NodeSettingsScreen({super.key});
@@ -67,6 +68,7 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
     final themeMode = ref.watch(themeProvider);
+    final custom = ref.watch(customThemeProvider);
 
     final peerIdDisplay = _nodeInfo != null
         ? compactPeerId(_nodeInfo!.id)
@@ -153,12 +155,26 @@ class _NodeSettingsScreenState extends ConsumerState<NodeSettingsScreen> {
                       ButtonSegment(value: ThemeMode.light, icon: Icon(Icons.light_mode_outlined), label: Text('Light')),
                       ButtonSegment(value: ThemeMode.dark, icon: Icon(Icons.dark_mode_outlined), label: Text('Dark')),
                     ],
-                    selected: {themeMode},
-                    onSelectionChanged: (selection) => ref.read(themeProvider.notifier).setThemeMode(selection.first),
+                    // None of the three while a custom theme is on; picking one turns it off
+                    emptySelectionAllowed: true,
+                    selected: custom.enabled ? const {} : {themeMode},
+                    onSelectionChanged: (selection) {
+                      ref.read(customThemeProvider.notifier).turnOff();
+                      if (selection.isNotEmpty) ref.read(themeProvider.notifier).setThemeMode(selection.first);
+                    },
                   ),
                 ),
               ],
             ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.palette_outlined),
+            title: const Text('Customize theme'),
+            subtitle: Text(custom.enabled && custom.config != null
+                ? 'Using "${custom.config!.name}"'
+                : 'Pick colours, or import a theme your team shared'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ThemeEditorScreen())),
           ),
 
           const _SectionHeader('Privacy and sync'),

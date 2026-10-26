@@ -769,11 +769,11 @@ class _Composer extends StatelessWidget {
                 onPressed: canSend ? onSend : null,
                 tooltip: 'Send',
                 iconSize: 22,
-                // Ember in both themes: sending is what lights your messages up
+                // The accent (ember) in every theme: sending is what lights your messages up
                 style: IconButton.styleFrom(
                   minimumSize: const Size.square(48),
-                  backgroundColor: AppTheme.ember,
-                  foregroundColor: AppTheme.onEmber,
+                  backgroundColor: ChatterColors.of(context).accent,
+                  foregroundColor: ChatterColors.of(context).onAccent,
                 ),
                 icon: const Icon(Icons.arrow_upward),
               ),

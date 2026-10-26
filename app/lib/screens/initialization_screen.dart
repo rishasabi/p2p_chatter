@@ -213,7 +213,7 @@ class _InitializationScreenState extends State<InitializationScreen> {
                         done: isCompleted,
                         active: isActive,
                         last: index == _bootSteps.length - 1,
-                        lit: AppTheme.ember,
+                        lit: colors.accent,
                         faint: colors.faint,
                       ),
                     ),

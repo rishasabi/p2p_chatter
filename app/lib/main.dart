@@ -11,6 +11,7 @@ import 'screens/mesh_screen.dart';
 import 'screens/nearby_screen.dart';
 import 'screens/node_settings_screen.dart';
 import 'services/ble_service.dart';
+import 'services/custom_theme_store.dart';
 import 'services/draft_store.dart';
 import 'services/embedded_node_service.dart';
 import 'services/settings_store.dart';
@@ -27,6 +28,7 @@ void main() async {
   });
   // Saved settings (theme etc.) must be in place before the first frame
   await SettingsStore().load();
+  await CustomThemeStore().load();
   await DraftStore().load();
   // Ensure the embedded background Go service runs with the app as a single unit
   await EmbeddedNodeService().ensureStarted();
@@ -44,12 +46,14 @@ class P2PChatApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final themeMode = ref.watch(themeProvider);
+    // A custom palette, while on, stands in for both
+    final custom = ref.watch(customThemeDataProvider);
 
     return MaterialApp(
       title: title,
       debugShowCheckedModeBanner: false,
-      theme: AppTheme.light(),
-      darkTheme: AppTheme.dark(),
+      theme: custom ?? AppTheme.light(),
+      darkTheme: custom ?? AppTheme.dark(),
       themeMode: themeMode,
       // Switch in one frame: cross-fading rebuilds every screen ~12 times
       themeAnimationDuration: Duration.zero,

@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -15,13 +17,16 @@ import 'package:app/screens/initialization_screen.dart';
 import 'package:app/screens/mesh_screen.dart';
 import 'package:app/screens/nearby_screen.dart';
 import 'package:app/screens/node_settings_screen.dart';
+import 'package:app/screens/theme_editor_screen.dart';
 import 'package:app/screens/wifi_qr_screen.dart';
 import 'package:app/services/api_service.dart';
 import 'package:app/services/ble_service.dart';
+import 'package:app/services/custom_theme_store.dart';
 import 'package:app/services/draft_store.dart';
 import 'package:app/services/embedded_node_service.dart';
 import 'package:app/services/local_store.dart';
 import 'package:app/theme/app_theme.dart';
+import 'package:app/theme/custom_theme.dart';
 import 'package:app/widgets/mesh_map.dart';
 import 'package:app/widgets/message_text.dart';
 import 'package:app/widgets/time_format.dart';
@@ -34,11 +39,12 @@ double contrast(Color a, Color b) {
 }
 
 /// Hosts [child] the way the app does, at a given size, text scale and theme.
-/// With no [mode], it follows the saved theme choice like the real app.
+/// With no [mode], it follows the saved theme choice (custom palette
+/// included) like the real app.
 Widget host(Widget child, {ThemeMode? mode, double textScale = 1}) => ProviderScope(
       child: Consumer(builder: (context, ref, _) => MaterialApp(
-        theme: AppTheme.light(),
-        darkTheme: AppTheme.dark(),
+        theme: (mode == null ? ref.watch(customThemeDataProvider) : null) ?? AppTheme.light(),
+        darkTheme: (mode == null ? ref.watch(customThemeDataProvider) : null) ?? AppTheme.dark(),
         themeMode: mode ?? ref.watch(themeProvider),
         builder: (context, app) => MediaQuery(
           data: MediaQuery.of(context).copyWith(textScaler: TextScaler.linear(textScale)),
@@ -103,6 +109,226 @@ void main() {
         expect(theme.textTheme.bodySmall!.fontSize, greaterThanOrEqualTo(12));
       }
     });
+  });
+
+  group('Custom themes', () {
+    // The example a team would pass around, exactly as written
+    const tacticalJson = '''
+{
+  "name": "Tactical Red Night",
+  "version": 1,
+  "colors": {
+    "primary": "#E11D48",
+    "surface": "#0F172A",
+    "cardBackground": "#1E293B",
+    "appBar": "#090D16",
+    "myBubble": "#BE123C",
+    "myBubbleText": "#FFFFFF",
+    "peerBubble": "#334155",
+    "peerBubbleText": "#F8FAFC",
+    "reachIndicator": "#22C55E",
+    "accentEmber": "#F43F5E"
+  }
+}''';
+
+    setUp(() => ApplicationAPI().stopPolling());
+    // A test that applies a theme mustn't leave it on for the next one
+    tearDown(() => CustomThemeStore().save((config: null, enabled: false)));
+
+    // Scrolls [finder] to mid-screen, clear of the Apply bar at the bottom
+    Future<void> centre(WidgetTester tester, Finder finder) async {
+      await Scrollable.ensureVisible(tester.element(finder), alignment: 0.5);
+      await tester.pump();
+    }
+
+    test('a shared theme file reads back exactly, and survives a round trip', () {
+      final config = CustomThemeConfig.decode(tacticalJson);
+      expect(config, CustomThemeConfig.tacticalRedNight);
+      expect(CustomThemeConfig.decode(config.encode()), config);
+      expect(jsonDecode(config.encode())['colors']['appBar'], '#090D16');
+    });
+
+    test('broken or foreign theme files are refused with a reason', () {
+      String reason(String text) {
+        try {
+          CustomThemeConfig.decode(text);
+        } on FormatException catch (e) {
+          return e.message;
+        }
+        fail('accepted $text');
+      }
+
+      expect(reason('not json'), contains('valid JSON'));
+      expect(reason('[1, 2]'), contains('JSON object'));
+      expect(reason('{"version": 2, "colors": {"primary": "#000000"}}'), contains('newer Chatter'));
+      expect(reason('{"version": 1, "colors": {"primary": "red"}}'), contains('"primary"'));
+      expect(reason('{"version": 1, "colors": {"sparkles": "#FFFFFF"}}'), contains('none of its colors'));
+      // A partial theme takes the rest from the default
+      final partial = CustomThemeConfig.decode('{"version": 1, "colors": {"myBubble": "#123456"}}');
+      expect(partial[ThemeColorRole.myBubble], const Color(0xFF123456));
+      expect(partial[ThemeColorRole.surface], CustomThemeConfig.lanternNight[ThemeColorRole.surface]);
+      expect(partial.name, 'Custom theme');
+    });
+
+    test('a palette reaches every component, with readable text on its colours', () {
+      for (final preset in CustomThemeConfig.presets) {
+        final theme = AppTheme.custom(preset);
+        final cs = theme.colorScheme;
+        final chatter = theme.extension<ChatterColors>()!;
+        expect(cs.surface, preset[ThemeColorRole.surface]);
+        expect(cs.primary, preset[ThemeColorRole.primary]);
+        expect(cs.surfaceContainerLow, preset[ThemeColorRole.cardBackground]);
+        expect(theme.appBarTheme.backgroundColor, preset[ThemeColorRole.appBar]);
+        expect(chatter.bubbleOut, preset[ThemeColorRole.myBubble]);
+        expect(chatter.onBubbleOut, preset[ThemeColorRole.myBubbleText]);
+        expect(chatter.bubbleIn, preset[ThemeColorRole.peerBubble]);
+        expect(chatter.onBubbleIn, preset[ThemeColorRole.peerBubbleText]);
+        expect(chatter.reach, preset[ThemeColorRole.reachIndicator]);
+        expect(chatter.accent, preset[ThemeColorRole.accentEmber]);
+        expect(theme.brightness, preset.isDark ? Brightness.dark : Brightness.light);
+        // Colours the app works out for itself always read
+        for (final (what, fg, bg) in [
+          ('body text', cs.onSurface, cs.surface),
+          ('button label', cs.onPrimary, cs.primary),
+          ('top bar title', theme.appBarTheme.foregroundColor!, preset[ThemeColorRole.appBar]),
+          ('accent icon', chatter.onAccent, chatter.accent),
+        ]) {
+          expect(contrastRatio(fg, bg), greaterThanOrEqualTo(4.5), reason: '${preset.name}: $what');
+        }
+        // Bubble text, as picked, reads in every preset
+        expect(preset.lowContrast().where((p) => p.what.contains('message text')), isEmpty, reason: preset.name);
+      }
+      // A clash is pointed out
+      final unreadable = CustomThemeConfig.oledBlack.withColor(ThemeColorRole.myBubbleText, const Color(0xFFFFE066));
+      expect(unreadable.lowContrast().single.what, 'Your message text');
+    });
+
+    testWidgets('colours are edited with a live preview, then applied to the whole app', (tester) async {
+      await setScreen(tester, const Size(390, 900));
+      await tester.pumpWidget(host(const NodeSettingsScreen()));
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.scrollUntilVisible(find.text('Customize theme'), 200);
+      await tester.tap(find.text('Customize theme'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ThemePreview), findsOneWidget);
+      ChatterColors preview() => ChatterColors.of(tester.element(find.text('On my way, 10 min')));
+
+      // Start from a preset, then change one colour by its hex value
+      await centre(tester, find.text('OLED black'));
+      await tester.tap(find.text('OLED black'));
+      await tester.pump();
+      await centre(tester, find.byType(ThemePreview));
+      expect(preview().bubbleIn, CustomThemeConfig.oledBlack[ThemeColorRole.peerBubble]);
+      await tester.scrollUntilVisible(find.text('Your messages'), 200, scrollable: find.byType(Scrollable).first);
+      await centre(tester, find.text('Your messages'));
+      await tester.tap(find.text('Your messages'));
+      await tester.pumpAndSettle();
+      final hex = find.widgetWithText(TextField, 'Hex colour');
+      await tester.enterText(hex, 'nope');
+      await tester.pump();
+      expect(find.text('Use six hex digits, like #E11D48'), findsOneWidget);
+      await tester.enterText(hex, '#2563EB');
+      await tester.pump();
+      await tester.tap(find.text('Use colour'));
+      await tester.pumpAndSettle();
+      expect(find.text('#2563EB'), findsOneWidget);
+      await tester.drag(find.byType(Scrollable).first, const Offset(0, 3000)); // back up to the preview
+      await tester.pumpAndSettle();
+      expect(preview().bubbleOut, const Color(0xFF2563EB));
+      // Not applied yet: the app around the editor is unchanged
+      expect(ChatterColors.of(tester.element(find.text('Customize theme'))).bubbleOut, isNot(const Color(0xFF2563EB)));
+
+      await tester.tap(find.text('Apply theme'));
+      await tester.pumpAndSettle();
+      final app = ChatterColors.of(tester.element(find.text('Customize theme')));
+      expect(app.bubbleOut, const Color(0xFF2563EB));
+      expect(Theme.of(tester.element(find.text('Customize theme'))).colorScheme.surface, const Color(0xFF000000));
+      expect(find.text('Applied'), findsOneWidget);
+
+      // Back in Settings, it's named; picking Light goes back to the standard theme
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(find.text('Using "OLED black"'), findsOneWidget);
+      await tester.scrollUntilVisible(find.text('Light'), -200);
+      await tester.tap(find.text('Light'));
+      await tester.pumpAndSettle();
+      expect(Theme.of(tester.element(find.text('Theme'))).colorScheme.surface, AppTheme.light().colorScheme.surface);
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(seconds: 4)); // the notice times out
+    });
+
+    testWidgets('leaving with unapplied colours asks first', (tester) async {
+      await setScreen(tester, const Size(390, 900));
+      await tester.pumpWidget(host(const NodeSettingsScreen()));
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.scrollUntilVisible(find.text('Customize theme'), 200);
+      await tester.tap(find.text('Customize theme'));
+      await tester.pumpAndSettle();
+      await centre(tester, find.text('Sunlight'));
+      await tester.tap(find.text('Sunlight'));
+      await tester.pump();
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(find.text('Discard changes?'), findsOneWidget);
+      await tester.tap(find.text('Discard'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ThemePreview), findsNothing);
+    });
+
+    testWidgets('a pasted theme is checked, then applied at once; the current one copies as JSON', (tester) async {
+      await setScreen(tester, const Size(390, 900));
+      String? copied;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.setData') copied = (call.arguments as Map)['text'] as String;
+        return null;
+      });
+      addTearDown(() => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null));
+      await tester.pumpWidget(host(const ThemeEditorScreen()));
+      await tester.pump();
+
+      await tester.tap(find.byTooltip('Import theme'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Paste theme JSON'));
+      await tester.pumpAndSettle();
+      final field = find.descendant(of: find.byType(AlertDialog), matching: find.byType(TextField));
+      await tester.enterText(field, '{"version": 1, "colors": {"surface": "dark"}}');
+      await tester.tap(find.text('Import and apply'));
+      await tester.pump();
+      expect(find.textContaining('"surface" should be a colour'), findsOneWidget);
+      await tester.enterText(field, tacticalJson);
+      await tester.tap(find.text('Import and apply'));
+      await tester.pumpAndSettle();
+
+      // On straight away, everywhere
+      final theme = Theme.of(tester.element(find.text('Customize theme')));
+      expect(theme.colorScheme.surface, const Color(0xFF0F172A));
+      expect(theme.appBarTheme.backgroundColor, const Color(0xFF090D16));
+      expect(find.text('"Tactical Red Night" is on'), findsOneWidget);
+      // Its red primary is a little dim on navy, and the editor says so
+      expect(find.textContaining('Buttons and links on the background is hard to read'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('Export theme'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Copy theme JSON'));
+      await tester.pumpAndSettle();
+      expect(CustomThemeConfig.decode(copied!), CustomThemeConfig.tacticalRedNight);
+      expect(tester.takeException(), isNull);
+      await tester.pump(const Duration(seconds: 4)); // the notice times out
+    });
+
+    for (final mode in [ThemeMode.light, ThemeMode.dark]) {
+      testWidgets('the editor lays out at 320px wide with 2x text in ${mode.name} mode', (tester) async {
+        await setScreen(tester, const Size(320, 640));
+        await tester.pumpWidget(host(const ThemeEditorScreen(), mode: mode, textScale: 2));
+        await tester.pump();
+        await tester.scrollUntilVisible(find.text('Accent: you, Send, selection'), 300,
+            scrollable: find.byType(Scrollable).first);
+        await tester.tap(find.text('Accent: you, Send, selection'));
+        await tester.pumpAndSettle();
+        expect(find.text('Use colour'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      });
+    }
   });
 
   group('Time labels', () {

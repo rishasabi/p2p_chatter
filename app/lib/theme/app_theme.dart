@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'custom_theme.dart';
+
 /// Chatter's look, "lantern relay": an indigo night (or a pale dawn) where
 /// your phone and everything you send glows ember, and the mesh itself is
 /// drawn as nodes, links and range rings.
@@ -24,6 +26,51 @@ abstract final class AppTheme {
 
   static ThemeData light() => _build(_lightScheme, ChatterColors.light);
   static ThemeData dark() => _build(_darkScheme, ChatterColors.dark);
+
+  /// A palette the user picked or imported, laid over the light or dark
+  /// theme (whichever its background is closer to) for every colour it
+  /// doesn't set. Text and icons on its colours go black or white as needed.
+  static ThemeData custom(CustomThemeConfig config) {
+    Color c(ThemeColorRole role) => config[role];
+    final base = config.isDark ? _darkScheme : _lightScheme;
+    final surface = c(ThemeColorRole.surface);
+    final card = c(ThemeColorRole.cardBackground);
+    final primary = c(ThemeColorRole.primary);
+    final accent = c(ThemeColorRole.accentEmber);
+    final onSurface = readableOn(surface, base.onSurface);
+    final primaryContainer = Color.lerp(surface, primary, 0.35)!;
+
+    final cs = base.copyWith(
+      primary: primary,
+      onPrimary: readableOn(primary),
+      primaryContainer: primaryContainer,
+      onPrimaryContainer: readableOn(primaryContainer, onSurface),
+      surface: surface,
+      onSurface: onSurface,
+      onSurfaceVariant: readableOn(surface, base.onSurfaceVariant),
+      surfaceContainerLowest: Color.lerp(surface, card, 0.5),
+      surfaceContainerLow: card,
+      surfaceContainer: card,
+      surfaceContainerHigh: Color.lerp(card, onSurface, 0.05),
+      surfaceContainerHighest: Color.lerp(card, onSurface, 0.12),
+      secondaryContainer: Color.lerp(card, onSurface, 0.1),
+      outline: Color.lerp(surface, onSurface, 0.55),
+      outlineVariant: Color.lerp(card, onSurface, 0.16),
+      inversePrimary: accent,
+    );
+    final chatter = (config.isDark ? ChatterColors.dark : ChatterColors.light).copyWith(
+      bubbleOut: c(ThemeColorRole.myBubble),
+      onBubbleOut: c(ThemeColorRole.myBubbleText),
+      bubbleIn: c(ThemeColorRole.peerBubble),
+      onBubbleIn: c(ThemeColorRole.peerBubbleText),
+      reach: c(ThemeColorRole.reachIndicator),
+      link: accent,
+      faint: Color.lerp(surface, onSurface, 0.22),
+      accent: accent,
+      onAccent: readableOn(accent),
+    );
+    return _build(cs, chatter, appBar: c(ThemeColorRole.appBar));
+  }
 
   static const _lightScheme = ColorScheme(
     brightness: Brightness.light,
@@ -132,8 +179,11 @@ abstract final class AppTheme {
     ).apply(bodyColor: cs.onSurface, displayColor: cs.onSurface);
   }
 
-  static ThemeData _build(ColorScheme cs, ChatterColors chatter) {
+  static ThemeData _build(ColorScheme cs, ChatterColors chatter, {Color? appBar}) {
     final text = _textTheme(cs);
+    final accent = chatter.accent;
+    final onAccent = chatter.onAccent;
+    final appBarColor = appBar ?? cs.surface;
     final isDark = cs.brightness == Brightness.dark;
     const controlShape = StadiumBorder();
     const buttonSize = Size(64, 48);
@@ -156,38 +206,38 @@ abstract final class AppTheme {
       materialTapTargetSize: MaterialTapTargetSize.padded,
       splashFactory: InkSparkle.splashFactory,
       appBarTheme: AppBarTheme(
-        backgroundColor: cs.surface,
-        foregroundColor: cs.onSurface,
+        backgroundColor: appBarColor,
+        foregroundColor: readableOn(appBarColor, cs.onSurface),
         surfaceTintColor: Colors.transparent,
         elevation: 0,
         scrolledUnderElevation: 0,
         centerTitle: false,
         titleSpacing: 20,
         toolbarHeight: 64,
-        titleTextStyle: text.headlineSmall,
-        systemOverlayStyle: overlayStyle(cs.brightness),
+        titleTextStyle: text.headlineSmall!.copyWith(color: readableOn(appBarColor, cs.onSurface)),
+        systemOverlayStyle: overlayStyle(cs.brightness, navigationBar: cs.surfaceContainer),
       ),
       navigationBarTheme: NavigationBarThemeData(
         backgroundColor: cs.surfaceContainer,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
         height: 72,
-        // The selected destination lights up ember, like your node on the map
-        indicatorColor: ember,
+        // The selected destination lights up in the accent, like your node on the map
+        indicatorColor: accent,
         indicatorShape: const StadiumBorder(),
         labelTextStyle: WidgetStateProperty.resolveWith((states) => text.labelMedium!.copyWith(
               color: states.contains(WidgetState.selected) ? cs.onSurface : cs.onSurfaceVariant,
             )),
         iconTheme: WidgetStateProperty.resolveWith((states) => IconThemeData(
               size: 24,
-              color: states.contains(WidgetState.selected) ? onEmber : cs.onSurfaceVariant,
+              color: states.contains(WidgetState.selected) ? onAccent : cs.onSurfaceVariant,
             )),
       ),
       navigationRailTheme: NavigationRailThemeData(
         backgroundColor: cs.surfaceContainer,
-        indicatorColor: ember,
+        indicatorColor: accent,
         indicatorShape: const StadiumBorder(),
-        selectedIconTheme: const IconThemeData(color: onEmber),
+        selectedIconTheme: IconThemeData(color: onAccent),
         unselectedIconTheme: IconThemeData(color: cs.onSurfaceVariant),
         selectedLabelTextStyle: text.labelMedium!.copyWith(color: cs.onSurface),
         unselectedLabelTextStyle: text.labelMedium!.copyWith(color: cs.onSurfaceVariant),
@@ -196,7 +246,7 @@ abstract final class AppTheme {
         labelColor: cs.onSurface,
         unselectedLabelColor: cs.onSurfaceVariant,
         indicator: UnderlineTabIndicator(
-          borderSide: const BorderSide(color: ember, width: 3),
+          borderSide: BorderSide(color: accent, width: 3),
           borderRadius: BorderRadius.circular(2),
         ),
         indicatorSize: TabBarIndicatorSize.label,
@@ -251,8 +301,8 @@ abstract final class AppTheme {
         style: SegmentedButton.styleFrom(
           minimumSize: buttonSize,
           textStyle: text.labelMedium!.copyWith(fontSize: 14),
-          selectedBackgroundColor: ember,
-          selectedForegroundColor: onEmber,
+          selectedBackgroundColor: accent,
+          selectedForegroundColor: onAccent,
           side: BorderSide(color: cs.outline),
         ),
       ),
@@ -265,10 +315,10 @@ abstract final class AppTheme {
       ),
       switchTheme: SwitchThemeData(
         thumbColor: WidgetStateProperty.resolveWith(
-          (states) => states.contains(WidgetState.selected) ? onEmber : cs.outline,
+          (states) => states.contains(WidgetState.selected) ? onAccent : cs.outline,
         ),
         trackColor: WidgetStateProperty.resolveWith(
-          (states) => states.contains(WidgetState.selected) ? ember : cs.surfaceContainerHighest,
+          (states) => states.contains(WidgetState.selected) ? accent : cs.surfaceContainerHighest,
         ),
         trackOutlineColor: WidgetStateProperty.resolveWith(
           (states) => states.contains(WidgetState.selected) ? Colors.transparent : cs.outline,
@@ -316,17 +366,17 @@ abstract final class AppTheme {
         textStyle: text.bodySmall!.copyWith(color: cs.onInverseSurface),
         decoration: BoxDecoration(color: cs.inverseSurface, borderRadius: BorderRadius.circular(8)),
       ),
-      badgeTheme: const BadgeThemeData(backgroundColor: ember, textColor: onEmber),
+      badgeTheme: BadgeThemeData(backgroundColor: accent, textColor: onAccent),
       iconTheme: IconThemeData(color: cs.onSurfaceVariant, size: 24),
     );
   }
 
   /// Status and navigation bar icons that stay visible on either theme.
-  static SystemUiOverlayStyle overlayStyle(Brightness brightness) {
+  static SystemUiOverlayStyle overlayStyle(Brightness brightness, {Color? navigationBar}) {
     final base = brightness == Brightness.dark ? SystemUiOverlayStyle.light : SystemUiOverlayStyle.dark;
     return base.copyWith(
       statusBarColor: Colors.transparent,
-      systemNavigationBarColor: brightness == Brightness.dark ? _darkScheme.surfaceContainer : Colors.white,
+      systemNavigationBarColor: navigationBar ?? (brightness == Brightness.dark ? _darkScheme.surfaceContainer : Colors.white),
       systemNavigationBarIconBrightness: brightness == Brightness.dark ? Brightness.light : Brightness.dark,
     );
   }
@@ -357,6 +407,11 @@ class ChatterColors extends ThemeExtension<ChatterColors> {
   final Color warningContainer;
   final Color onWarningContainer;
 
+  /// You: your node, the Send button, selected tabs and switches. Ember
+  /// unless a custom theme picks another.
+  final Color accent;
+  final Color onAccent;
+
   const ChatterColors({
     required this.bubbleOut,
     required this.onBubbleOut,
@@ -369,6 +424,8 @@ class ChatterColors extends ThemeExtension<ChatterColors> {
     required this.warning,
     required this.warningContainer,
     required this.onWarningContainer,
+    this.accent = AppTheme.ember,
+    this.onAccent = AppTheme.onEmber,
   });
 
   static const light = ChatterColors(
@@ -416,6 +473,8 @@ class ChatterColors extends ThemeExtension<ChatterColors> {
     Color? warning,
     Color? warningContainer,
     Color? onWarningContainer,
+    Color? accent,
+    Color? onAccent,
   }) =>
       ChatterColors(
         bubbleOut: bubbleOut ?? this.bubbleOut,
@@ -429,6 +488,8 @@ class ChatterColors extends ThemeExtension<ChatterColors> {
         warning: warning ?? this.warning,
         warningContainer: warningContainer ?? this.warningContainer,
         onWarningContainer: onWarningContainer ?? this.onWarningContainer,
+        accent: accent ?? this.accent,
+        onAccent: onAccent ?? this.onAccent,
       );
 
   @override
@@ -446,6 +507,8 @@ class ChatterColors extends ThemeExtension<ChatterColors> {
       warning: Color.lerp(warning, other.warning, t)!,
       warningContainer: Color.lerp(warningContainer, other.warningContainer, t)!,
       onWarningContainer: Color.lerp(onWarningContainer, other.onWarningContainer, t)!,
+      accent: Color.lerp(accent, other.accent, t)!,
+      onAccent: Color.lerp(onAccent, other.onAccent, t)!,
     );
   }
 }
